@@ -9,6 +9,16 @@ interface Props {
 
 const STEP_LABELS = ["信息提取", "联网研究", "报告生成", "字段回填", "索引生成", "知识库推送"];
 
+/** Check if a step was skipped or failed based on log messages. */
+function isStepSkipped(step: number, logs: string[]): boolean {
+  if (step !== 6) return false;
+  return logs.some(
+    (l) =>
+      l.includes("步骤6") &&
+      (l.includes("跳过") || l.includes("失败") || l.includes("无分块数据")),
+  );
+}
+
 export default function PipelineProgress({ progress, logs, error, done }: Props) {
   const currentStep = progress?.step ?? 0;
 
@@ -20,15 +30,16 @@ export default function PipelineProgress({ progress, logs, error, done }: Props)
           const step = i + 1;
           const isActive = step === currentStep;
           const isComplete = step < currentStep || done;
+          const skipped = isComplete && isStepSkipped(step, logs);
           return (
             <div key={step} className="flex items-center gap-2">
               <div
                 className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold
-                  ${isComplete ? "bg-green-500 text-white" : isActive ? "bg-blue-500 text-white animate-pulse" : "bg-gray-200 text-gray-500"}`}
+                  ${skipped ? "bg-red-400 text-white" : isComplete ? "bg-green-500 text-white" : isActive ? "bg-blue-500 text-white animate-pulse" : "bg-gray-200 text-gray-500"}`}
               >
-                {isComplete ? "✓" : step}
+                {skipped ? "✗" : isComplete ? "✓" : step}
               </div>
-              <span className={`text-sm ${isActive ? "text-blue-700 font-medium" : "text-gray-500"}`}>
+              <span className={`text-sm ${skipped ? "text-red-500" : isActive ? "text-blue-700 font-medium" : "text-gray-500"}`}>
                 {label}
               </span>
               {i < STEP_LABELS.length - 1 && <div className="w-8 h-0.5 bg-gray-200" />}

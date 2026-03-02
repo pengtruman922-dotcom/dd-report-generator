@@ -13,10 +13,10 @@ async def extract_fields(
     current_metadata: dict[str, Any],
     report_md: str,
     ai_config: dict,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict]:
     """Extract structured fields from the generated report.
 
-    Returns a dict of {field_key: new_value} for fields that should be updated.
+    Returns (dict of {field_key: new_value}, usage_dict) for fields that should be updated.
     """
     client = create_client(ai_config["base_url"], ai_config["api_key"])
 
@@ -38,7 +38,7 @@ async def extract_fields(
         {"role": "user", "content": user_message},
     ]
 
-    response = await chat_completion(
+    response, usage_dict = await chat_completion(
         client, ai_config["model"], messages, temperature=0.1
     )
     content = response.choices[0].message.content.strip()
@@ -51,5 +51,5 @@ async def extract_fields(
 
     result = json.loads(content)
     if not isinstance(result, dict):
-        return {}
-    return result
+        return {}, usage_dict
+    return result, usage_dict

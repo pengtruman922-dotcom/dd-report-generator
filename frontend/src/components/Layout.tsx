@@ -60,7 +60,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           <div className="flex items-center gap-4">
             <nav className="flex gap-4 text-sm">
               {navLink("/reports", "首页")}
-              {isAdmin && navLink("/settings", "AI 设置")}
+              {isAdmin && navLink("/settings", "设置")}
               {isAdmin && navLink("/accounts", "账号管理")}
             </nav>
             {/* User menu */}

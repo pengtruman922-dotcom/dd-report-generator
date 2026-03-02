@@ -2,13 +2,16 @@ import { useState, useCallback, useEffect } from "react";
 import { useLocation } from "react-router-dom";
 import FileUpload from "./FileUpload";
 import CompanySelector from "./CompanySelector";
+import CompanySelectorMulti from "./CompanySelectorMulti";
 import PipelineProgress from "./PipelineProgress";
+import BatchProgress from "./BatchProgress";
 import ReportViewer from "./ReportViewer";
 import ReportActions from "./ReportActions";
 import {
   uploadExcel,
   uploadAttachments,
   generateReport,
+  batchGenerateReports,
   getReport,
   submitManualInput,
   getFieldDefs,
@@ -17,9 +20,10 @@ import { useSSE } from "../hooks/useSSE";
 import type { Company, FieldDef, ReportMeta } from "../types";
 
 type InputMode = "excel" | "manual";
+type GenerateMode = "single" | "batch";
 
 // Manual input form field ordering (required first)
-const REQUIRED_KEYS = ["bd_code", "company_name", "project_name"];
+const REQUIRED_KEYS = ["company_name", "project_name"];  // bd_code now optional (auto-generated)
 
 interface RegenerateState {
   regenerateId: string;
@@ -39,6 +43,8 @@ export default function HomePage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [selectedBd, setSelectedBd] = useState<string | null>(null);
+  const [selectedBds, setSelectedBds] = useState<Set<string>>(new Set());
+  const [generateMode, setGenerateMode] = useState<GenerateMode>("single");
   const [attachmentNames, setAttachmentNames] = useState<string[]>(() => {
     if (regenState?.meta?.attachments) {
       return regenState.meta.attachments.map((a) => a.filename);
@@ -68,6 +74,7 @@ export default function HomePage() {
 
   // Generation state
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [batchTaskIds, setBatchTaskIds] = useState<string[]>([]);
   const [reportContent, setReportContent] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
 
@@ -106,8 +113,11 @@ export default function HomePage() {
     setSessionId(null);
     setCompanies([]);
     setSelectedBd(null);
+    setSelectedBds(new Set());
+    setGenerateMode("single");
     setAttachmentNames([]);
     setTaskId(null);
+    setBatchTaskIds([]);
     setReportContent(null);
     setManualData({});
     setManualReady(false);
@@ -176,6 +186,7 @@ export default function HomePage() {
     setGenerating(true);
     setReportContent(null);
     setTaskId(null);
+    setBatchTaskIds([]);
     try {
       const res = await generateReport(sessionId, selectedBd, regenerateId ?? undefined);
       setTaskId(res.task_id);
@@ -183,6 +194,40 @@ export default function HomePage() {
       alert("生成失败: " + e.message);
       setGenerating(false);
     }
+  };
+
+  // Batch generate
+  const handleBatchGenerate = async () => {
+    if (!sessionId || selectedBds.size === 0) return;
+    setGenerating(true);
+    setReportContent(null);
+    setTaskId(null);
+    setBatchTaskIds([]);
+    try {
+      const res = await batchGenerateReports(sessionId, Array.from(selectedBds));
+      setBatchTaskIds(res.task_ids);
+    } catch (e: any) {
+      alert("批量生成失败: " + e.message);
+      setGenerating(false);
+    }
+  };
+
+  // Multi-select handlers
+  const handleToggleBd = (bdCode: string) => {
+    setSelectedBds((prev) => {
+      const next = new Set(prev);
+      if (next.has(bdCode)) next.delete(bdCode);
+      else next.add(bdCode);
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    setSelectedBds(new Set(companies.map((c) => c.bd_code)));
+  };
+
+  const handleClearAll = () => {
+    setSelectedBds(new Set());
   };
 
   const selectedCompany = companies.find((c) => c.bd_code === selectedBd);
@@ -194,7 +239,11 @@ export default function HomePage() {
     inputMode === "excel" ? companies.length > 0 : manualReady;
   // Has completed step 2
   const step2Done =
-    inputMode === "excel" ? !!selectedBd : manualReady;
+    inputMode === "excel"
+      ? generateMode === "single"
+        ? !!selectedBd
+        : selectedBds.size > 0
+      : manualReady;
 
   // Sort field defs: required first, then by original order
   const sortedFields = [...fieldDefs].sort((a, b) => {
@@ -319,17 +368,52 @@ export default function HomePage() {
       {/* Step 2: Select project (Excel mode only) */}
       {inputMode === "excel" && companies.length > 0 && (
         <section className="bg-white rounded-lg shadow p-5">
-          <h2 className="font-bold text-lg mb-3">2. 选择目标项目</h2>
-          <CompanySelector
-            companies={companies}
-            selected={selectedBd}
-            onSelect={(bd) => {
-              setSelectedBd(bd);
-              setAttachmentNames([]);
-              setTaskId(null);
-              setReportContent(null);
-            }}
-          />
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-bold text-lg">2. 选择目标项目</h2>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setGenerateMode("single")}
+                className={`px-3 py-1 rounded text-sm font-medium transition ${
+                  generateMode === "single"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                单个生成
+              </button>
+              <button
+                onClick={() => setGenerateMode("batch")}
+                className={`px-3 py-1 rounded text-sm font-medium transition ${
+                  generateMode === "batch"
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                批量生成
+              </button>
+            </div>
+          </div>
+          {generateMode === "single" ? (
+            <CompanySelector
+              companies={companies}
+              selected={selectedBd}
+              onSelect={(bd) => {
+                setSelectedBd(bd);
+                setAttachmentNames([]);
+                setTaskId(null);
+                setBatchTaskIds([]);
+                setReportContent(null);
+              }}
+            />
+          ) : (
+            <CompanySelectorMulti
+              companies={companies}
+              selected={selectedBds}
+              onToggle={handleToggleBd}
+              onSelectAll={handleSelectAll}
+              onClearAll={handleClearAll}
+            />
+          )}
         </section>
       )}
 
@@ -370,22 +454,34 @@ export default function HomePage() {
           <h2 className="font-bold text-lg mb-3">
             {inputMode === "excel" ? "4" : "3"}. 生成报告
           </h2>
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
-          >
-            {generating
-              ? "生成中..."
-              : regenerateId
-                ? `重新生成 ${displayName} 的尽调报告`
-                : `生成 ${displayName} 的尽调报告`}
-          </button>
+          {generateMode === "single" ? (
+            <button
+              onClick={handleGenerate}
+              disabled={generating}
+              className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+            >
+              {generating
+                ? "生成中..."
+                : regenerateId
+                  ? `重新生成 ${displayName} 的尽调报告`
+                  : `生成 ${displayName} 的尽调报告`}
+            </button>
+          ) : (
+            <button
+              onClick={handleBatchGenerate}
+              disabled={generating || selectedBds.size === 0}
+              className="px-6 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium"
+            >
+              {generating
+                ? "批量生成中..."
+                : `批量生成 ${selectedBds.size} 份报告`}
+            </button>
+          )}
         </section>
       )}
 
       {/* Progress */}
-      {taskId && (
+      {taskId && generateMode === "single" && (
         <section className="bg-white rounded-lg shadow p-5">
           <h2 className="font-bold text-lg mb-3">生成进度</h2>
           <PipelineProgress
@@ -393,6 +489,21 @@ export default function HomePage() {
             logs={sse.logs}
             error={sse.error}
             done={sse.done}
+          />
+        </section>
+      )}
+
+      {/* Batch Progress */}
+      {batchTaskIds.length > 0 && generateMode === "batch" && (
+        <section className="bg-white rounded-lg shadow p-5">
+          <h2 className="font-bold text-lg mb-3">批量生成进度</h2>
+          <BatchProgress
+            taskIds={batchTaskIds}
+            companies={companies.filter((c) => selectedBds.has(c.bd_code))}
+            onAllComplete={() => {
+              setGenerating(false);
+              alert("批量生成完成！");
+            }}
           />
         </section>
       )}

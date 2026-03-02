@@ -9,6 +9,8 @@ import type {
   ReportChunk,
   UserInfo,
   AttachmentInfo,
+  ToolProviderInfo,
+  ToolsConfig,
 } from "../types";
 
 const BASE = "/api";
@@ -112,6 +114,19 @@ export async function generateReport(
   return res.json();
 }
 
+export async function batchGenerateReports(
+  sessionId: string,
+  bdCodes: string[],
+): Promise<{ task_ids: string[]; count: number }> {
+  const res = await authFetch(`${BASE}/report/batch-generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, bd_codes: bdCodes }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function getReport(reportId: string): Promise<ReportResponse> {
   const res = await authFetch(`${BASE}/report/${reportId}`);
   if (!res.ok) throw new Error(await res.text());
@@ -120,6 +135,10 @@ export async function getReport(reportId: string): Promise<ReportResponse> {
 
 export function getDownloadUrl(reportId: string): string {
   return `${BASE}/report/${reportId}/download`;
+}
+
+export function getPdfDownloadUrl(reportId: string): string {
+  return `${BASE}/report/${reportId}/download/pdf`;
 }
 
 export function createProgressSource(taskId: string): EventSource {
@@ -270,6 +289,18 @@ export async function confirmReport(reportId: string): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
+export async function updateReportContent(
+  reportId: string,
+  content: string,
+): Promise<void> {
+  const res = await authFetch(`${BASE}/report/${reportId}/content`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
 export async function listAttachments(reportId: string): Promise<AttachmentInfo[]> {
   const res = await authFetch(`${BASE}/report/${reportId}/attachments`);
   if (!res.ok) throw new Error(await res.text());
@@ -301,4 +332,27 @@ export async function uploadReportAttachments(
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+// ── Tool configuration ──
+
+export async function getToolProviders(): Promise<Record<string, ToolProviderInfo[]>> {
+  const res = await authFetch(`${BASE}/tools/providers`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getToolsConfig(): Promise<ToolsConfig> {
+  const res = await authFetch(`${BASE}/tools`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
+  const res = await authFetch(`${BASE}/tools`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tools: config }),
+  });
+  if (!res.ok) throw new Error(await res.text());
 }

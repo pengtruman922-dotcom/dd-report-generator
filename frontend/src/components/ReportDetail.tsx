@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getReport, getDownloadUrl, getChunks } from "../api/client";
+import { getReport, getDownloadUrl, getPdfDownloadUrl, getChunks } from "../api/client";
 import ReportViewer from "./ReportViewer";
 import ChunkEditor from "./ChunkEditor";
 
@@ -37,7 +37,9 @@ export default function ReportDetail() {
     if (content) navigator.clipboard.writeText(content);
   };
 
-  const handlePrint = () => window.print();
+  const handleContentUpdate = (newContent: string) => {
+    setContent(newContent);
+  };
 
   if (loading) {
     return (
@@ -78,17 +80,18 @@ export default function ReportDetail() {
           >
             下载 .md
           </a>
+          <a
+            href={getPdfDownloadUrl(reportId!)}
+            download
+            className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+          >
+            下载 PDF
+          </a>
           <button
             onClick={handleCopy}
             className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300"
           >
             复制内容
-          </button>
-          <button
-            onClick={handlePrint}
-            className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300"
-          >
-            打印
           </button>
         </div>
       </div>
@@ -120,7 +123,13 @@ export default function ReportDetail() {
         </button>
       </div>
 
-      {tab === "report" && <ReportViewer content={content} />}
+      {tab === "report" && (
+        <ReportViewer
+          content={content}
+          reportId={reportId}
+          onContentUpdate={handleContentUpdate}
+        />
+      )}
       {tab === "chunks" && <ChunkEditor reportId={reportId!} />}
     </div>
   );

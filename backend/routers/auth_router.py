@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth import get_current_user, require_admin
-from db import get_db, hash_password, generate_token
+from db import get_db, hash_password, verify_password_with_migration, generate_token
 
 router = APIRouter()
 
@@ -40,11 +40,14 @@ async def login(req: LoginRequest):
     """Verify credentials, create session, return token + user info."""
     conn = get_db()
     try:
+        # Look up user first, then verify password separately
         row = conn.execute(
-            "SELECT id, username, role, must_change_password FROM users WHERE username = ? AND password_hash = ?",
-            (req.username, hash_password(req.password)),
+            "SELECT id, username, password_hash, role, must_change_password FROM users WHERE username = ?",
+            (req.username,),
         ).fetchone()
         if not row:
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+        if not verify_password_with_migration(req.password, row["password_hash"], row["id"]):
             raise HTTPException(status_code=401, detail="用户名或密码错误")
         token = generate_token()
         conn.execute(
@@ -70,9 +73,6 @@ async def login(req: LoginRequest):
 @router.post("/logout")
 async def logout(user: dict = Depends(get_current_user)):
     """Delete the current session."""
-    # We need the token, re-extract from a simpler approach:
-    # Actually we can delete all sessions for this user — but the plan says delete session.
-    # Let's delete by user_id (simple approach, logs out all sessions for this user)
     conn = get_db()
     try:
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
@@ -95,10 +95,10 @@ async def change_password(req: ChangePasswordRequest, user: dict = Depends(get_c
     try:
         # Verify old password
         row = conn.execute(
-            "SELECT id FROM users WHERE id = ? AND password_hash = ?",
-            (user["id"], hash_password(req.old_password)),
+            "SELECT id, password_hash FROM users WHERE id = ?",
+            (user["id"],),
         ).fetchone()
-        if not row:
+        if not row or not verify_password_with_migration(req.old_password, row["password_hash"], row["id"]):
             raise HTTPException(status_code=400, detail="原密码错误")
         if len(req.new_password) < 6:
             raise HTTPException(status_code=400, detail="新密码长度至少6位")

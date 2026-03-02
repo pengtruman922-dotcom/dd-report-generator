@@ -33,7 +33,14 @@ export default function AttachmentPopover({ reportId, initialCount, onUpdate }: 
   const updatePos = useCallback(() => {
     if (!btnRef.current) return;
     const rect = btnRef.current.getBoundingClientRect();
-    setPos({ top: rect.bottom + 4, left: rect.left });
+    const popoverWidth = 288; // w-72 = 18rem = 288px
+    let left = rect.left;
+    // Prevent overflow on the right edge
+    if (left + popoverWidth > window.innerWidth - 8) {
+      left = window.innerWidth - popoverWidth - 8;
+    }
+    if (left < 8) left = 8;
+    setPos({ top: rect.bottom + 4, left });
   }, []);
 
   // Close on outside click

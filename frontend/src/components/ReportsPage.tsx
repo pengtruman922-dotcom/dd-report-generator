@@ -1,12 +1,14 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import {
   listReports,
   deleteReport,
   batchDeleteReports,
-  getDownloadUrl,
+  getPdfDownloadUrl,
   pushToFastGPT,
   confirmReport,
+  updateReportMeta,
 } from "../api/client";
 import type { ReportMeta, PushStatus } from "../types";
 import { useAuth } from "../contexts/AuthContext";
@@ -62,6 +64,11 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+/** Get final rating: manual_rating if set, otherwise AI rating */
+function getFinalRating(row: ReportMeta): string | null {
+  return row.manual_rating || row.rating;
+}
+
 const ALL_COLUMNS: ColumnDef[] = [
   // ── Default visible (existing report fields) ──
   { key: "bd_code", label: "标的编码", defaultVisible: true, sortable: true },
@@ -97,14 +104,38 @@ const ALL_COLUMNS: ColumnDef[] = [
     key: "rating",
     label: "评级",
     defaultVisible: true,
-    render: (val, row) =>
-      val ? (
-        <span className={`inline-block px-2 py-0.5 rounded text-xs ${ratingBadge(val)}`}>
-          {stars(row.score)} {val}
-        </span>
-      ) : (
-        <span className="text-gray-400">--</span>
-      ),
+    render: (val, row) => {
+      const finalRating = getFinalRating(row);
+      const isManual = !!row.manual_rating;
+      const options = ["强烈推荐", "推荐", "谨慎推荐", "不推荐", "不建议"];
+
+      return (
+        <div className="flex items-center gap-2">
+          {finalRating ? (
+            <span className={`inline-block px-2 py-0.5 rounded text-xs ${ratingBadge(finalRating)}`}>
+              {stars(row.score)} {finalRating}
+            </span>
+          ) : (
+            <span className="text-gray-400 text-xs">--</span>
+          )}
+          {isManual && (
+            <span className="text-xs text-purple-600 font-medium" title="人工评级">✓</span>
+          )}
+          <select
+            value={row.manual_rating || ""}
+            onChange={(e) => window.__updateManualRating?.(row.report_id, e.target.value || null)}
+            className="text-xs px-1 py-0.5 rounded border bg-white hover:bg-gray-50"
+            title={row.manual_rating_note || "点击修改人工评级"}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <option value="">使用AI评级</option>
+            {options.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </div>
+      );
+    },
   },
   {
     key: "status",
@@ -216,6 +247,7 @@ declare global {
     __navigateReport?: (id: string) => void;
     __confirmReport?: (id: string) => void;
     __refreshReports?: () => void;
+    __updateManualRating?: (id: string, rating: string | null) => void;
   }
 }
 
@@ -241,6 +273,16 @@ export default function ReportsPage() {
     }
   }, []);
 
+  // Update manual rating handler
+  const handleUpdateManualRating = useCallback(async (id: string, rating: string | null) => {
+    try {
+      await updateReportMeta(id, { manual_rating: rating });
+      fetchReportsRef.current?.();
+    } catch (e: any) {
+      alert("更新人工评级失败: " + e.message);
+    }
+  }, []);
+
   // fetchReports ref for global access
   const fetchReportsRef = useRef<(() => void) | null>(null);
 
@@ -249,12 +291,14 @@ export default function ReportsPage() {
     window.__navigateReport = (id: string) => navigate(`/report/${id}`);
     window.__confirmReport = (id: string) => handleConfirm(id);
     window.__refreshReports = () => fetchReportsRef.current?.();
+    window.__updateManualRating = (id: string, rating: string | null) => handleUpdateManualRating(id, rating);
     return () => {
       delete window.__navigateReport;
       delete window.__confirmReport;
       delete window.__refreshReports;
+      delete window.__updateManualRating;
     };
-  }, [navigate, handleConfirm]);
+  }, [navigate, handleConfirm, handleUpdateManualRating]);
 
   const [reports, setReports] = useState<ReportMeta[]>([]);
   const [loading, setLoading] = useState(true);
@@ -379,11 +423,17 @@ export default function ReportsPage() {
     }
     if (ratingFilter !== "all") {
       if (ratingFilter === "recommended")
-        list = list.filter((r) => r.rating === "强烈推荐" || r.rating === "推荐");
+        list = list.filter((r) => {
+          const rating = getFinalRating(r);
+          return rating === "强烈推荐" || rating === "推荐";
+        });
       else if (ratingFilter === "cautious")
-        list = list.filter((r) => r.rating === "谨慎推荐");
+        list = list.filter((r) => getFinalRating(r) === "谨慎推荐");
       else if (ratingFilter === "not_recommended")
-        list = list.filter((r) => r.rating === "不推荐" || r.rating === "不建议");
+        list = list.filter((r) => {
+          const rating = getFinalRating(r);
+          return rating === "不推荐" || rating === "不建议";
+        });
     }
     if (pushStatusFilter !== "all") {
       list = list.filter((r) => r.push_status === pushStatusFilter);
@@ -455,6 +505,55 @@ export default function ReportsPage() {
       fetchReports();
     } catch (e: any) { alert("批量删除失败: " + e.message); }
   };
+
+  // Single-report push
+  const [pushingId, setPushingId] = useState<string | null>(null);
+  const handlePush = async (id: string) => {
+    setPushingId(id);
+    try {
+      const result = await pushToFastGPT(id);
+      alert(`已推送 ${result.uploaded}/${result.total} 条到知识库`);
+      fetchReports();
+    } catch (e: any) {
+      alert("推送失败: " + e.message);
+    }
+    setPushingId(null);
+  };
+
+  // "More" dropdown — portal-based to avoid overflow clipping
+  const [moreOpenId, setMoreOpenId] = useState<string | null>(null);
+  const [morePos, setMorePos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const moreRef = useRef<HTMLDivElement>(null);
+  const moreBtnRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+
+  const openMore = (id: string) => {
+    if (moreOpenId === id) { setMoreOpenId(null); return; }
+    const btn = moreBtnRefs.current.get(id);
+    if (btn) {
+      const rect = btn.getBoundingClientRect();
+      const menuW = 144; // w-36
+      let left = rect.right - menuW;
+      if (left < 8) left = 8;
+      setMorePos({ top: rect.bottom + 4, left });
+    }
+    setMoreOpenId(id);
+  };
+
+  useEffect(() => {
+    if (!moreOpenId) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const btn = moreBtnRefs.current.get(moreOpenId);
+      if (
+        moreRef.current && !moreRef.current.contains(target) &&
+        (!btn || !btn.contains(target))
+      ) {
+        setMoreOpenId(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [moreOpenId]);
 
   // Column config helpers
   const toggleColumn = (key: string) => {
@@ -528,7 +627,11 @@ export default function ReportsPage() {
       if (val === "outdated") return "需更新";
     }
     if (col.key === "score" && typeof val === "number") return val.toFixed(1);
-    if (col.key === "rating" && val) return `${stars(row.score)} ${val}`;
+    if (col.key === "rating") {
+      const finalRating = getFinalRating(row);
+      return finalRating ? `${stars(row.score)} ${finalRating}` : "";
+    }
+    if (col.key === "manual_rating") return val || "";
     return String(val);
   };
 
@@ -755,25 +858,27 @@ export default function ReportsPage() {
                             d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                         </svg>
                       </button>
-                      <button onClick={() => navigate("/new", { state: { regenerateId: r.report_id, meta: r } })}
-                        className="p-1.5 text-gray-500 hover:text-orange-600 hover:bg-orange-50 rounded" title="生成报告">
+                      <button
+                        onClick={() => handlePush(r.report_id)}
+                        disabled={pushingId === r.report_id}
+                        className="p-1.5 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded disabled:opacity-40"
+                        title="推送到知识库"
+                      >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                         </svg>
                       </button>
-                      <a href={getDownloadUrl(r.report_id)} download
-                        className="p-1.5 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded" title="下载">
+                      {/* More dropdown trigger */}
+                      <button
+                        ref={(el) => { if (el) moreBtnRefs.current.set(r.report_id, el); }}
+                        onClick={() => openMore(r.report_id)}
+                        className="p-1.5 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded"
+                        title="更多"
+                      >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                        </svg>
-                      </a>
-                      <button onClick={() => setConfirmDelete(r.report_id)}
-                        className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded" title="删除">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
                         </svg>
                       </button>
                     </div>
@@ -784,6 +889,53 @@ export default function ReportsPage() {
           </table>
         </div>
       )}
+
+      {/* "More" dropdown portal */}
+      {moreOpenId && (() => {
+        const r = reports.find((x) => x.report_id === moreOpenId);
+        if (!r) return null;
+        return createPortal(
+          <div
+            ref={moreRef}
+            className="fixed w-36 bg-white border rounded-lg shadow-xl z-[9999] py-1"
+            style={{ top: morePos.top, left: morePos.left }}
+          >
+            <button
+              onClick={() => { setMoreOpenId(null); navigate("/new", { state: { regenerateId: r.report_id, meta: r } }); }}
+              className="w-full text-left px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+            >
+              <svg className="w-4 h-4 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              生成报告
+            </button>
+            <a
+              href={getPdfDownloadUrl(r.report_id)}
+              download
+              onClick={() => setMoreOpenId(null)}
+              className="w-full text-left px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+            >
+              <svg className="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              下载 PDF
+            </a>
+            <button
+              onClick={() => { setMoreOpenId(null); setConfirmDelete(r.report_id); }}
+              className="w-full text-left px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              删除
+            </button>
+          </div>,
+          document.body,
+        );
+      })()}
 
       {/* Pagination */}
       {filtered.length > 0 && (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -12,25 +13,97 @@ from fastapi import APIRouter, File, UploadFile, HTTPException
 from pydantic import BaseModel
 
 from config import UPLOAD_DIR
+from db import get_db, get_next_bd_code
 from parsers.excel_parser import parse_excel, get_company_list, FIELD_LABELS
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory store: session_id → { excel_path, companies, attachments, parsed_texts }
-_sessions: dict[str, dict] = {}
+
+# ── Session persistence helpers (SQLite) ─────────────────────
+
+def _save_session(session_id: str, data: dict) -> None:
+    """Persist session data to SQLite (parsed_texts stored as file refs)."""
+    # Separate large parsed_texts to disk
+    parsed_texts = data.get("parsed_texts", {})
+    if parsed_texts:
+        texts_dir = UPLOAD_DIR / session_id / "_parsed"
+        texts_dir.mkdir(parents=True, exist_ok=True)
+        refs: dict[str, list[dict]] = {}
+        for bd_code, items in parsed_texts.items():
+            refs[bd_code] = []
+            for i, (filename, text) in enumerate(items):
+                text_file = texts_dir / f"{bd_code}_{i}.txt"
+                text_file.write_text(text, encoding="utf-8")
+                refs[bd_code].append({"filename": filename, "path": str(text_file)})
+        data_to_store = {**data, "parsed_texts_refs": refs}
+    else:
+        data_to_store = {**data}
+    # Remove raw parsed_texts from JSON (too large)
+    data_to_store.pop("parsed_texts", None)
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO upload_sessions (session_id, data) VALUES (?, ?)",
+            (session_id, json.dumps(data_to_store, ensure_ascii=False)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _load_session(session_id: str) -> dict | None:
+    """Load session data from SQLite, restoring parsed_texts from disk."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT data FROM upload_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    data = json.loads(row["data"])
+    # Restore parsed_texts from file refs
+    refs = data.pop("parsed_texts_refs", {})
+    parsed_texts: dict[str, list[tuple[str, str]]] = {}
+    for bd_code, items in refs.items():
+        parsed_texts[bd_code] = []
+        for item in items:
+            text_path = Path(item["path"])
+            if text_path.exists():
+                text = text_path.read_text(encoding="utf-8")
+                parsed_texts[bd_code].append((item["filename"], text))
+    data["parsed_texts"] = parsed_texts
+    return data
+
+
+# In-memory cache (backed by SQLite for persistence)
+_sessions_cache: dict[str, dict] = {}
 
 
 def get_session(session_id: str) -> dict:
-    if session_id not in _sessions:
+    """Get session from cache or load from DB."""
+    if session_id in _sessions_cache:
+        return _sessions_cache[session_id]
+    data = _load_session(session_id)
+    if data is None:
         raise HTTPException(404, f"Session {session_id} not found")
-    return _sessions[session_id]
+    _sessions_cache[session_id] = data
+    return data
+
+
+def _persist_session(session_id: str, data: dict) -> None:
+    """Save to both cache and DB."""
+    _sessions_cache[session_id] = data
+    _save_session(session_id, data)
 
 
 class ManualInputRequest(BaseModel):
-    """Manual input fields - bd_code, company_name, project_name required."""
-    bd_code: str
+    """Manual input fields - company_name, project_name required; bd_code optional (auto-generated if empty)."""
+    bd_code: str | None = None
     company_name: str
     project_name: str
     revenue_yuan: str | None = None
@@ -74,16 +147,26 @@ async def upload_excel(file: UploadFile = File(...)):
     try:
         companies = get_company_list(str(file_path))
         all_rows = parse_excel(str(file_path))
+
+        # Auto-generate bd_code for rows with empty bd_code
+        for company in companies:
+            if not company.get("bd_code") or not company["bd_code"].strip():
+                company["bd_code"] = get_next_bd_code()
+        for row in all_rows:
+            if not row.get("bd_code") or not str(row["bd_code"]).strip():
+                row["bd_code"] = get_next_bd_code()
+
     except Exception as e:
         raise HTTPException(422, f"Failed to parse Excel: {e}")
 
-    _sessions[session_id] = {
+    session_data = {
         "excel_path": str(file_path),
         "companies": companies,
         "all_rows": all_rows,
-        "attachments": {},      # bd_code → [file_paths]
-        "parsed_texts": {},     # bd_code → [(filename, text)]
+        "attachments": {},
+        "parsed_texts": {},
     }
+    _persist_session(session_id, session_data)
 
     return {
         "session_id": session_id,
@@ -99,15 +182,20 @@ async def manual_input(req: ManualInputRequest):
     session_dir = UPLOAD_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    row = req.model_dump()
-    # Remove None values
-    row = {k: v for k, v in row.items() if v is not None}
+    # Auto-generate bd_code if not provided
+    bd_code = req.bd_code.strip() if req.bd_code else ""
+    if not bd_code:
+        bd_code = get_next_bd_code()
 
-    _sessions[session_id] = {
+    row = req.model_dump()
+    row = {k: v for k, v in row.items() if v is not None}
+    row["bd_code"] = bd_code
+
+    session_data = {
         "excel_path": None,
         "companies": [
             {
-                "bd_code": req.bd_code,
+                "bd_code": bd_code,
                 "company_name": req.company_name,
                 "project_name": req.project_name,
             }
@@ -116,10 +204,11 @@ async def manual_input(req: ManualInputRequest):
         "attachments": {},
         "parsed_texts": {},
     }
+    _persist_session(session_id, session_data)
 
     return {
         "session_id": session_id,
-        "bd_code": req.bd_code,
+        "bd_code": bd_code,
         "company_name": req.company_name,
         "project_name": req.project_name,
     }
@@ -128,10 +217,9 @@ async def manual_input(req: ManualInputRequest):
 @router.get("/fields")
 async def get_field_definitions():
     """Return the field definitions for manual input form."""
-    required = ["bd_code", "company_name", "project_name"]
+    required = ["company_name", "project_name"]  # bd_code now optional
     fields = []
     for en_key, cn_label in FIELD_LABELS.items():
-        # Skip attachment-only fields
         if en_key in ("intro_attachment", "annual_report_attachment"):
             continue
         fields.append({
@@ -143,11 +231,7 @@ async def get_field_definitions():
 
 
 def _parse_from_bytes(filename: str, raw_bytes: bytes) -> str:
-    """Parse attachment text from raw in-memory bytes (before any disk encryption).
-
-    This avoids issues with filesystem-level encryption (e.g. TSD) that may
-    alter files after they are written to disk.
-    """
+    """Parse attachment text from raw in-memory bytes (before any disk encryption)."""
     ext = Path(filename).suffix.lower()
 
     if ext == ".pdf":
@@ -213,7 +297,6 @@ def _parse_pdf_from_bytes(filename: str, raw_bytes: bytes) -> str:
 
 def _ocr_pdf_from_bytes(raw_bytes: bytes, known_page_count: int) -> str:
     """OCR a PDF from in-memory bytes."""
-    # Try PyMuPDF rendering first
     try:
         import fitz
         from rapidocr_onnxruntime import RapidOCR
@@ -239,7 +322,6 @@ def _ocr_pdf_from_bytes(raw_bytes: bytes, known_page_count: int) -> str:
     except Exception as e:
         log.debug("  OCR via PyMuPDF bytes failed: %s", e)
 
-    # Fallback: pdfplumber rendering
     try:
         import pdfplumber
         from rapidocr_onnxruntime import RapidOCR
@@ -274,7 +356,6 @@ def _parse_docx_from_bytes(filename: str, raw_bytes: bytes) -> str:
     """Parse DOCX from in-memory bytes."""
     try:
         from parsers.docx_parser import extract_docx_text
-        # python-docx accepts file-like objects
         return extract_docx_text(io.BytesIO(raw_bytes))
     except Exception as e:
         log.debug("  DOCX bytes parse failed for %s: %s", filename, e)
@@ -297,11 +378,7 @@ async def upload_attachments(
     bd_code: str,
     files: list[UploadFile] = File(...),
 ):
-    """Upload PDF/MD attachments for a specific company.
-
-    Files are parsed immediately from in-memory bytes (before writing to disk)
-    to avoid filesystem-level encryption (e.g. TSD) corrupting the saved files.
-    """
+    """Upload PDF/MD attachments for a specific company."""
     session = get_session(session_id)
     session_dir = UPLOAD_DIR / session_id / bd_code
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -316,19 +393,16 @@ async def upload_attachments(
             skipped.append(f.filename)
             continue
 
-        # Read raw bytes from upload stream (before any disk encryption)
         raw_bytes = await f.read()
         if not raw_bytes:
             skipped.append(f.filename)
             continue
 
-        # Save to disk (for reference/backup)
         dest = session_dir / f.filename
         with open(dest, "wb") as out:
             out.write(raw_bytes)
         saved.append(str(dest))
 
-        # Parse text from in-memory bytes immediately
         log.info("Parsing attachment from memory: %s (%d bytes)", f.filename, len(raw_bytes))
         try:
             text = _parse_from_bytes(f.filename, raw_bytes)
@@ -347,6 +421,8 @@ async def upload_attachments(
             parsed.append({"filename": f.filename, "text_length": 0, "error": str(e)})
 
     session["attachments"].setdefault(bd_code, []).extend(saved)
+    # Persist updated session
+    _persist_session(session_id, session)
 
     return {
         "bd_code": bd_code,
@@ -368,6 +444,6 @@ async def get_session_info(session_id: str):
     }
 
 
-# Expose sessions dict for other routers
+# Expose sessions for other routers
 def get_sessions():
-    return _sessions
+    return _sessions_cache

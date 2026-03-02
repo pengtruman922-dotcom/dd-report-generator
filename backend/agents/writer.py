@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date
-from typing import Any
+from typing import Any, Callable
 
-from agents.base_agent import create_client, chat_completion
+from agents.base_agent import create_client, chat_completion, chat_completion_stream
 from prompts.writer_prompt import SYSTEM_PROMPT
 
 
@@ -15,10 +16,18 @@ async def write_report(
     research_data: dict[str, Any],
     ai_config: dict,
     attachment_items: list[tuple[str, str]] | None = None,
-) -> str:
-    """Generate the full Markdown DD report. Returns the report text.
+    on_stream_chunk: Callable[[str], Any] | None = None,
+) -> tuple[str, dict]:
+    """Generate the full Markdown DD report. Returns (report text, usage_dict).
 
     attachment_items: optional list of (filename, text) tuples with raw attachment content.
+    on_stream_chunk: optional callback for streaming chunks (async or sync function)
+
+    Returns:
+        tuple: (report_text, usage_dict)
+
+    Note: When streaming, token usage is estimated based on content length since
+    streaming responses don't always include usage information.
     """
     client = create_client(ai_config["base_url"], ai_config["api_key"])
 
@@ -49,11 +58,41 @@ async def write_report(
         {"role": "user", "content": user_message},
     ]
 
-    response = await chat_completion(
-        client,
-        ai_config["model"],
-        messages,
-        temperature=0.4,
-    )
+    # Use streaming if callback is provided
+    if on_stream_chunk:
+        full_content = []
+        async for chunk in chat_completion_stream(
+            client,
+            ai_config["model"],
+            messages,
+            temperature=0.4,
+        ):
+            full_content.append(chunk)
+            # Call the callback (handle both sync and async)
+            if asyncio.iscoroutinefunction(on_stream_chunk):
+                await on_stream_chunk(chunk)
+            else:
+                on_stream_chunk(chunk)
 
-    return response.choices[0].message.content
+        report_text = "".join(full_content)
+
+        # Estimate token usage for streaming (rough approximation: 1 token ≈ 4 chars)
+        # This is a fallback since streaming doesn't always provide usage info
+        estimated_completion_tokens = len(report_text) // 4
+        estimated_prompt_tokens = (len(user_message) + len(SYSTEM_PROMPT)) // 4
+        usage_dict = {
+            "prompt_tokens": estimated_prompt_tokens,
+            "completion_tokens": estimated_completion_tokens,
+            "total_tokens": estimated_prompt_tokens + estimated_completion_tokens,
+        }
+
+        return report_text, usage_dict
+    else:
+        # Non-streaming fallback
+        response, usage_dict = await chat_completion(
+            client,
+            ai_config["model"],
+            messages,
+            temperature=0.4,
+        )
+        return response.choices[0].message.content, usage_dict

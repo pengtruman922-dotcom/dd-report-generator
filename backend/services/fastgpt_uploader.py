@@ -33,7 +33,9 @@ def save_push_record(
     uploaded: int,
     total: int,
 ) -> None:
-    """Save a push record into the report metadata JSON."""
+    """Save a push record into the report metadata JSON and database."""
+    from db import get_db
+
     chunks_hash = compute_chunks_hash(report_id)
     meta_path = OUTPUT_DIR / f"{report_id}.json"
     meta: dict = {}
@@ -51,6 +53,20 @@ def save_push_record(
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info("Saved push record for %s → dataset %s (hash=%s)", report_id, dataset_id, chunks_hash)
 
+    # Update database
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE reports SET push_records = ?, updated_at = ? WHERE report_id = ?",
+            (json.dumps(push_records), datetime.now().isoformat(), report_id)
+        )
+        conn.commit()
+        conn.close()
+        log.info(f"Updated push_records in database for report {report_id}")
+    except Exception as e:
+        log.error(f"Failed to update push_records in database for {report_id}: {e}")
+
 
 async def delete_collection(collection_id: str, fastgpt_config: dict[str, str]) -> None:
     """Delete a FastGPT collection. Failures are logged but not raised."""
@@ -61,7 +77,7 @@ async def delete_collection(collection_id: str, fastgpt_config: dict[str, str]) 
         "Content-Type": "application/json",
     }
     try:
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=True, timeout=30) as client:
             res = await client.delete(
                 f"{api_url}/collection/delete",
                 headers=headers,
@@ -79,6 +95,7 @@ async def push_chunks_to_fastgpt(
     chunks: list[dict[str, Any]],
     collection_name: str,
     fastgpt_config: dict[str, str],
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Push chunks to FastGPT knowledge base.
 
@@ -86,6 +103,7 @@ async def push_chunks_to_fastgpt(
         chunks: List of {title, q, indexes: [{text}]} dicts
         collection_name: Name for the new collection in FastGPT
         fastgpt_config: {api_url, api_key, dataset_id}
+        tags: Optional list of tag labels (e.g., ["尽调报告", "BD00001", "推荐"])
 
     Returns:
         {"collection_id": str, "uploaded": int, "total": int}
@@ -102,16 +120,20 @@ async def push_chunks_to_fastgpt(
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(verify=False, timeout=60) as client:
-        # 1. Create collection
+    async with httpx.AsyncClient(verify=True, timeout=60) as client:
+        # 1. Create collection with tags
+        create_payload = {
+            "datasetId": dataset_id,
+            "name": collection_name,
+            "type": "virtual",
+        }
+        if tags:
+            create_payload["tags"] = tags
+
         res = await client.post(
             f"{api_url}/collection/create",
             headers=headers,
-            json={
-                "datasetId": dataset_id,
-                "name": collection_name,
-                "type": "virtual",
-            },
+            json=create_payload,
         )
         if res.status_code != 200:
             raise RuntimeError(f"创建集合失败 ({res.status_code}): {res.text}")

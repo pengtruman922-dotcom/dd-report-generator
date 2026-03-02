@@ -35,6 +35,10 @@ class SSEManager:
     async def send_progress(self, task_id: str, step: int, total: int, message: str):
         await self.send(task_id, "progress", {"step": step, "total": total, "message": message})
 
+    async def send_stream_chunk(self, task_id: str, chunk: str):
+        """Send a streaming chunk of report content."""
+        await self.send(task_id, "stream", {"chunk": chunk})
+
     async def send_complete(self, task_id: str, report_id: str):
         await self.send(task_id, "complete", {"report_id": report_id})
 

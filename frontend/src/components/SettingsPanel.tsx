@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { getSettings, saveSettings } from "../api/client";
 import type { AISettings, StepConfig, FastGPTConfig } from "../types";
+import ToolSettingsPanel from "./ToolSettingsPanel";
 
 const DEFAULT_CONFIG: StepConfig = {
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -23,7 +25,20 @@ const STEPS: { key: keyof AISettings; label: string; desc: string }[] = [
   { key: "chunker", label: "步骤5: 索引生成", desc: "生成报告分块与搜索索引标签（可选，不配置则仅生成分块不生成AI索引）" },
 ];
 
+const TABS = [
+  { id: "ai", label: "AI 模型" },
+  { id: "tools", label: "搜索工具" },
+  { id: "fastgpt", label: "FastGPT" },
+] as const;
+
+type TabId = (typeof TABS)[number]["id"];
+
 export default function SettingsPanel() {
+  const location = useLocation();
+  const initTab = (location.state as any)?.tab;
+  const [activeTab, setActiveTab] = useState<TabId>(
+    initTab && TABS.some((t) => t.id === initTab) ? initTab : "ai",
+  );
   const [settings, setSettings] = useState<AISettings>({
     extractor: { ...DEFAULT_CONFIG },
     researcher: { ...DEFAULT_CONFIG },
@@ -92,125 +107,169 @@ export default function SettingsPanel() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-bold">AI 模型设置</h2>
-      <p className="text-sm text-gray-500">
-        每一步可以配置不同的AI模型。使用 OpenAI 兼容 API 格式。
-      </p>
+      {/* Tab bar */}
+      <div className="flex border-b">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
+              activeTab === tab.id
+                ? "border-blue-600 text-blue-600"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-      {STEPS.map(({ key, label, desc }) => (
-        <div key={key} className="bg-white rounded-lg shadow p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-semibold">{label}</h3>
-              <p className="text-xs text-gray-400">{desc}</p>
+      {/* Tab: AI Models */}
+      {activeTab === "ai" && (
+        <div className="space-y-6">
+          <h2 className="text-xl font-bold">AI 模型设置</h2>
+          <p className="text-sm text-gray-500">
+            每一步可以配置不同的AI模型。使用 OpenAI 兼容 API 格式。
+          </p>
+
+          {STEPS.map(({ key, label, desc }) => (
+            <div key={key} className="bg-white rounded-lg shadow p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-semibold">{label}</h3>
+                  <p className="text-xs text-gray-400">{desc}</p>
+                </div>
+                <button
+                  onClick={() => applyToAll(key)}
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  应用到全部
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500">Base URL</label>
+                  <input
+                    type="text"
+                    value={(settings[key] as StepConfig).base_url}
+                    onChange={(e) => update(key, "base_url", e.target.value)}
+                    className="w-full border rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">API Key</label>
+                  <input
+                    type="password"
+                    value={(settings[key] as StepConfig).api_key}
+                    onChange={(e) => update(key, "api_key", e.target.value)}
+                    className="w-full border rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Model</label>
+                  <input
+                    type="text"
+                    value={(settings[key] as StepConfig).model}
+                    onChange={(e) => update(key, "model", e.target.value)}
+                    className="w-full border rounded px-3 py-1.5 text-sm"
+                  />
+                </div>
+              </div>
             </div>
+          ))}
+
+          <div className="flex items-center gap-4">
             <button
-              onClick={() => applyToAll(key)}
-              className="text-xs text-blue-600 hover:underline"
+              onClick={handleSave}
+              disabled={saving}
+              className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
             >
-              应用到全部
+              {saving ? "保存中..." : "保存设置"}
             </button>
+            {message && (
+              <span className={`text-sm ${message.includes("失败") ? "text-red-600" : "text-green-600"}`}>
+                {message}
+              </span>
+            )}
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <label className="text-xs text-gray-500">Base URL</label>
-              <input
-                type="text"
-                value={(settings[key] as StepConfig).base_url}
-                onChange={(e) => update(key, "base_url", e.target.value)}
-                className="w-full border rounded px-3 py-1.5 text-sm"
-              />
+        </div>
+      )}
+
+      {/* Tab: Search Tools */}
+      {activeTab === "tools" && <ToolSettingsPanel />}
+
+      {/* Tab: FastGPT */}
+      {activeTab === "fastgpt" && (
+        <div className="space-y-6">
+          <h2 className="text-xl font-bold">FastGPT 知识库推送</h2>
+          <p className="text-sm text-gray-500">
+            生成索引后自动推送到 FastGPT 知识库。启用后将在 pipeline 最后一步自动执行。
+          </p>
+          <div className="bg-white rounded-lg shadow p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold">FastGPT 配置</h3>
+                <p className="text-xs text-gray-400">配置 FastGPT API 连接参数和目标知识库</p>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={fastgpt.enabled}
+                  onChange={(e) => updateFastgpt("enabled", e.target.checked)}
+                  className="w-4 h-4 rounded"
+                />
+                <span className="text-sm text-gray-600">启用自动推送</span>
+              </label>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-2">
+                <label className="text-xs text-gray-500">API URL</label>
+                <input
+                  type="text"
+                  value={fastgpt.api_url}
+                  onChange={(e) => updateFastgpt("api_url", e.target.value)}
+                  className="w-full border rounded px-3 py-1.5 text-sm"
+                  placeholder="https://your-fastgpt-server/api/core/dataset"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">Dataset ID</label>
+                <input
+                  type="text"
+                  value={fastgpt.dataset_id}
+                  onChange={(e) => updateFastgpt("dataset_id", e.target.value)}
+                  className="w-full border rounded px-3 py-1.5 text-sm"
+                />
+              </div>
             </div>
             <div>
               <label className="text-xs text-gray-500">API Key</label>
               <input
                 type="password"
-                value={(settings[key] as StepConfig).api_key}
-                onChange={(e) => update(key, "api_key", e.target.value)}
+                value={fastgpt.api_key}
+                onChange={(e) => updateFastgpt("api_key", e.target.value)}
                 className="w-full border rounded px-3 py-1.5 text-sm"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-500">Model</label>
-              <input
-                type="text"
-                value={(settings[key] as StepConfig).model}
-                onChange={(e) => update(key, "model", e.target.value)}
-                className="w-full border rounded px-3 py-1.5 text-sm"
+                placeholder="Bearer openapi-..."
               />
             </div>
           </div>
-        </div>
-      ))}
 
-      {/* FastGPT Knowledge Base Config */}
-      <h2 className="text-xl font-bold pt-4">FastGPT 知识库推送</h2>
-      <p className="text-sm text-gray-500">
-        生成索引后自动推送到 FastGPT 知识库。启用后将在 pipeline 最后一步自动执行。
-      </p>
-      <div className="bg-white rounded-lg shadow p-5 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="font-semibold">FastGPT 配置</h3>
-            <p className="text-xs text-gray-400">配置 FastGPT API 连接参数和目标知识库</p>
-          </div>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={fastgpt.enabled}
-              onChange={(e) => updateFastgpt("enabled", e.target.checked)}
-              className="w-4 h-4 rounded"
-            />
-            <span className="text-sm text-gray-600">启用自动推送</span>
-          </label>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="md:col-span-2">
-            <label className="text-xs text-gray-500">API URL</label>
-            <input
-              type="text"
-              value={fastgpt.api_url}
-              onChange={(e) => updateFastgpt("api_url", e.target.value)}
-              className="w-full border rounded px-3 py-1.5 text-sm"
-              placeholder="https://ai.mpgroup.cn:3100/api/core/dataset"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-500">Dataset ID</label>
-            <input
-              type="text"
-              value={fastgpt.dataset_id}
-              onChange={(e) => updateFastgpt("dataset_id", e.target.value)}
-              className="w-full border rounded px-3 py-1.5 text-sm"
-            />
+          <div className="flex items-center gap-4">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? "保存中..." : "保存设置"}
+            </button>
+            {message && (
+              <span className={`text-sm ${message.includes("失败") ? "text-red-600" : "text-green-600"}`}>
+                {message}
+              </span>
+            )}
           </div>
         </div>
-        <div>
-          <label className="text-xs text-gray-500">API Key</label>
-          <input
-            type="password"
-            value={fastgpt.api_key}
-            onChange={(e) => updateFastgpt("api_key", e.target.value)}
-            className="w-full border rounded px-3 py-1.5 text-sm"
-            placeholder="Bearer openapi-..."
-          />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-4">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-        >
-          {saving ? "保存中..." : "保存设置"}
-        </button>
-        {message && (
-          <span className={`text-sm ${message.includes("失败") ? "text-red-600" : "text-green-600"}`}>
-            {message}
-          </span>
-        )}
-      </div>
+      )}
     </div>
   );
 }

@@ -44,17 +44,65 @@ DEFAULT_AI_CONFIG = {
     },
 }
 
-# Default FastGPT config
+# Default FastGPT config (no hardcoded keys)
 DEFAULT_FASTGPT_CONFIG = {
     "enabled": True,
-    "api_url": "https://ai.mpgroup.cn:3100/api/core/dataset",
-    "api_key": "Bearer openapi-o7LmYAiqfKyHLMRTsIPb7jk18jxZkW4rrswNdBSaZzG16tOdo0UQu6kanU5a",
-    "dataset_id": "695dd01cbe98e4bfdd29bd92",
+    "api_url": "",
+    "api_key": "",
+    "dataset_id": "",
+}
+
+# Default tools config
+DEFAULT_TOOLS_CONFIG = {
+    "search": {
+        "active_provider": "bocha",  # Changed from duckduckgo - better for Chinese content
+        # Fallback chain: list of providers to try in order (optional)
+        # If not specified, only active_provider is used
+        "fallback_chain": ["bocha", "baidu", "bing_china", "duckduckgo"],
+        "providers": {
+            "duckduckgo": {},
+            "bing_china": {"api_key": ""},
+            "baidu": {"api_key": "", "secret_key": ""},
+            "bocha": {"api_key": ""},
+        },
+    },
+    "scraper": {
+        "active_provider": "jina_reader",
+        # Fallback chain for scrapers
+        "fallback_chain": ["jina_reader", "local_scraper"],
+        "providers": {
+            "jina_reader": {},
+            "local_scraper": {"timeout": 30, "content_limit": 8000},
+        },
+    },
+    "datasource": {
+        "active_providers": [],
+        "providers": {
+            "cninfo": {},
+            "akshare": {},
+            "tianyancha": {"api_key": ""},
+            "gsxt": {"timeout": 30},
+        },
+    },
 }
 
 # Researcher agent limits
 MAX_TOOL_ITERATIONS = 15
+RESEARCH_ITERATIONS = {
+    "listed": 10,      # Listed companies: less research needed (public data available)
+    "unlisted": 18,    # Unlisted companies: more research needed (less public data)
+    "default": 15,     # Unknown company type
+}
 JINA_CONTENT_LIMIT = 8000  # chars
+
+# Search quality thresholds
+SEARCH_QUALITY_THRESHOLD = 0.3  # Trigger fallback if quality score < 0.3
+MIN_SEARCH_RESULTS = 3  # Minimum number of results for acceptable quality
+
+# CORS origins (from env or default)
+CORS_ORIGINS = os.environ.get(
+    "CORS_ORIGINS", "http://localhost:5173"
+).split(",")
 
 
 def load_settings() -> dict:

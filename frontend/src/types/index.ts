@@ -97,6 +97,8 @@ export interface ReportMeta {
   remarks?: string | null;
   score: number | null;
   rating: string | null;
+  manual_rating?: string | null;
+  manual_rating_note?: string | null;
   status: string;
   created_at: string;
   file_size: number;
@@ -111,6 +113,9 @@ export interface ReportMeta {
 export interface ReportListResponse {
   reports: ReportMeta[];
   total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 export interface ChunkIndex {
@@ -143,4 +148,36 @@ export interface PushRecord {
   chunks_hash: string;
   uploaded: number;
   total: number;
+}
+
+// ── Tool configuration types ──────────────────────────────────
+
+export interface ToolConfigField {
+  key: string;
+  label: string;
+  type: "text" | "password" | "number";
+  required: boolean;
+  default: any;
+  description: string;
+}
+
+export interface ToolProviderInfo {
+  provider_id: string;
+  tool_type: string;
+  display_name: string;
+  description: string;
+  config_schema: ToolConfigField[];
+  target_company_type: "all" | "listed" | "unlisted";
+}
+
+export interface ToolTypeConfig {
+  active_provider?: string;       // for search/scraper (single select)
+  active_providers?: string[];    // for datasource (multi select)
+  providers: Record<string, Record<string, any>>;
+}
+
+export interface ToolsConfig {
+  search: ToolTypeConfig;
+  scraper: ToolTypeConfig;
+  datasource: ToolTypeConfig;
 }

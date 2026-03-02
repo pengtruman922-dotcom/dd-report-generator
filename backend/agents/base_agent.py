@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from openai import AsyncOpenAI
 
 
@@ -16,8 +18,15 @@ async def chat_completion(
     messages: list[dict],
     tools: list[dict] | None = None,
     temperature: float = 0.3,
-) -> dict:
-    """Call chat completions and return the raw response dict."""
+) -> tuple[Any, dict]:
+    """Call chat completions and return (response, usage_dict).
+
+    Returns:
+        tuple: (response, usage_dict) where usage_dict contains:
+            - prompt_tokens: int
+            - completion_tokens: int
+            - total_tokens: int
+    """
     kwargs: dict = {
         "model": model,
         "messages": messages,
@@ -28,4 +37,42 @@ async def chat_completion(
         kwargs["tool_choice"] = "auto"
 
     response = await client.chat.completions.create(**kwargs)
-    return response
+
+    # Extract usage information
+    usage_dict = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    if response.usage:
+        usage_dict["prompt_tokens"] = response.usage.prompt_tokens or 0
+        usage_dict["completion_tokens"] = response.usage.completion_tokens or 0
+        usage_dict["total_tokens"] = response.usage.total_tokens or 0
+
+    return response, usage_dict
+
+
+async def chat_completion_stream(
+    client: AsyncOpenAI,
+    model: str,
+    messages: list[dict],
+    temperature: float = 0.3,
+):
+    """Call chat completions with streaming and yield chunks.
+
+    Yields:
+        str: Content chunks from the streaming response
+
+    Note: Streaming responses don't include usage information until the end.
+    The final chunk may contain usage data, but it's not guaranteed.
+    """
+    response = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        stream=True,
+    )
+
+    async for chunk in response:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content

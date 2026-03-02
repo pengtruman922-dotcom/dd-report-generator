@@ -1,4 +1,5 @@
-import { getDownloadUrl } from "../api/client";
+import { useNavigate } from "react-router-dom";
+import { getDownloadUrl, getPdfDownloadUrl } from "../api/client";
 
 interface Props {
   reportId: string;
@@ -6,12 +7,10 @@ interface Props {
 }
 
 export default function ReportActions({ reportId, content }: Props) {
+  const navigate = useNavigate();
+
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
-  };
-
-  const handlePrint = () => {
-    window.print();
   };
 
   return (
@@ -23,6 +22,13 @@ export default function ReportActions({ reportId, content }: Props) {
       >
         下载 .md
       </a>
+      <a
+        href={getPdfDownloadUrl(reportId)}
+        download
+        className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+      >
+        下载 PDF
+      </a>
       <button
         onClick={handleCopy}
         className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300"
@@ -30,10 +36,10 @@ export default function ReportActions({ reportId, content }: Props) {
         复制内容
       </button>
       <button
-        onClick={handlePrint}
-        className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300"
+        onClick={() => navigate("/settings", { state: { tab: "fastgpt" } })}
+        className="px-4 py-2 bg-green-600 text-white text-sm rounded hover:bg-green-700"
       >
-        打印
+        推送到知识库
       </button>
     </div>
   );

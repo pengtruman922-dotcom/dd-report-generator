@@ -13,10 +13,13 @@ async def extract(
     excel_row: dict[str, Any],
     attachment_items: list[tuple[str, str]],
     ai_config: dict,
-) -> dict[str, Any]:
-    """Run the extractor and return a CompanyProfile dict.
+) -> tuple[dict[str, Any], dict]:
+    """Run the extractor and return (CompanyProfile dict, usage_dict).
 
     attachment_items: list of (filename, text) tuples.
+
+    Returns:
+        tuple: (company_profile, usage_dict)
     """
     client = create_client(ai_config["base_url"], ai_config["api_key"])
 
@@ -37,7 +40,7 @@ async def extract(
         {"role": "user", "content": user_message},
     ]
 
-    response = await chat_completion(client, ai_config["model"], messages)
+    response, usage_dict = await chat_completion(client, ai_config["model"], messages)
     content = response.choices[0].message.content
 
     # Parse JSON from response (handle markdown code blocks)
@@ -48,4 +51,4 @@ async def extract(
         lines = [l for l in lines if not l.strip().startswith("```")]
         content = "\n".join(lines)
 
-    return json.loads(content)
+    return json.loads(content), usage_dict
