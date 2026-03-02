@@ -145,9 +145,31 @@ export function createProgressSource(taskId: string): EventSource {
   return new EventSource(`${BASE}/report/progress/${taskId}`);
 }
 
-export async function listReports(owner?: string): Promise<ReportListResponse> {
-  const params = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-  const res = await authFetch(`${BASE}/report/list${params}`);
+export interface ListReportsParams {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  status?: string;
+  rating?: string;
+  owner?: string;
+  sort_by?: string;
+  sort_dir?: string;
+}
+
+export async function listReports(params?: ListReportsParams): Promise<ReportListResponse> {
+  const queryParams = new URLSearchParams();
+  if (params?.page) queryParams.set("page", params.page.toString());
+  if (params?.page_size) queryParams.set("page_size", params.page_size.toString());
+  if (params?.search) queryParams.set("search", params.search);
+  if (params?.status) queryParams.set("status", params.status);
+  if (params?.rating) queryParams.set("rating", params.rating);
+  if (params?.owner) queryParams.set("owner", params.owner);
+  if (params?.sort_by) queryParams.set("sort_by", params.sort_by);
+  if (params?.sort_dir) queryParams.set("sort_dir", params.sort_dir);
+
+  const queryString = queryParams.toString();
+  const url = queryString ? `${BASE}/report/list?${queryString}` : `${BASE}/report/list`;
+  const res = await authFetch(url);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -356,3 +378,25 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
   });
   if (!res.ok) throw new Error(await res.text());
 }
+
+// ── Version Management ──
+
+export async function listVersions(reportId: string): Promise<{ versions: any[]; count: number }> {
+  const res = await authFetch(`${BASE}/report/${reportId}/versions`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getVersion(reportId: string, versionId: string): Promise<any> {
+  const res = await authFetch(`${BASE}/report/${reportId}/versions/${versionId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function restoreVersion(reportId: string, versionId: string): Promise<void> {
+  const res = await authFetch(`${BASE}/report/${reportId}/versions/${versionId}/restore`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+

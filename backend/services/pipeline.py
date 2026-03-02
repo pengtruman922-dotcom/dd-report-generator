@@ -61,6 +61,8 @@ def _save_metadata(
     owner: str | None = None,
     attachments_info: list[dict] | None = None,
     is_regeneration: bool = False,
+    token_usage_json: str | None = None,
+    estimated_cost: float | None = None,
 ):
     """Save report metadata to both database and JSON file (dual-write)."""
     from db import get_db
@@ -154,7 +156,8 @@ def _save_metadata(
                     updated_at = ?, file_size = ?,
                     intro_attachment = ?, metadata_json = ?,
                     locked_fields = ?, push_records = ?, attachments = ?,
-                    md_path = ?, chunks_path = ?, debug_dir = ?, attachments_dir = ?
+                    md_path = ?, chunks_path = ?, debug_dir = ?, attachments_dir = ?,
+                    token_usage_json = ?, estimated_cost = ?
                 WHERE report_id = ?
             """, (
                 meta.get("bd_code"), meta.get("company_name"), meta.get("project_name"),
@@ -170,6 +173,7 @@ def _save_metadata(
                 meta.get("intro_attachment"), metadata_json,
                 locked_fields_json, push_records_json, attachments_json,
                 md_path, chunks_path, debug_dir, attachments_dir,
+                token_usage_json, estimated_cost,
                 report_id
             ))
         else:
@@ -188,7 +192,8 @@ def _save_metadata(
                     created_at, updated_at, file_size,
                     intro_attachment, metadata_json,
                     locked_fields, push_records, attachments,
-                    md_path, chunks_path, debug_dir, attachments_dir
+                    md_path, chunks_path, debug_dir, attachments_dir,
+                    token_usage_json, estimated_cost
                 ) VALUES (
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
@@ -202,7 +207,8 @@ def _save_metadata(
                     ?, ?, ?,
                     ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?, ?
+                    ?, ?, ?, ?,
+                    ?, ?
                 )
             """, (
                 report_id, meta.get("bd_code"), meta.get("company_name"), meta.get("project_name"),
@@ -217,7 +223,8 @@ def _save_metadata(
                 created_at, created_at, meta.get("file_size"),
                 meta.get("intro_attachment"), metadata_json,
                 locked_fields_json, push_records_json, attachments_json,
-                md_path, chunks_path, debug_dir, attachments_dir
+                md_path, chunks_path, debug_dir, attachments_dir,
+                token_usage_json, estimated_cost
             ))
 
         conn.commit()
@@ -259,6 +266,15 @@ async def run_pipeline(
     try:
         # Update task status to running
         await task_manager.update_task_status(task_id, TaskStatus.RUNNING, current_step=0)
+
+        # Create version backup before regeneration
+        if is_regeneration:
+            try:
+                from services.version_manager import create_version
+                create_version(task_id, reason="before_regeneration", created_by=owner)
+                log.info(f"Created version backup for report {task_id} before regeneration")
+            except Exception as e:
+                log.warning(f"Failed to create version backup: {e}")
 
         # Initialize token tracker
         token_tracker = TokenTracker()
@@ -330,10 +346,18 @@ async def run_pipeline(
         report_id = task_id
         report_path = OUTPUT_DIR / f"{report_id}.md"
         report_path.write_text(report_md, encoding="utf-8")
+
+        # Calculate token cost
+        model_name = wrt_cfg.get("model", "default")
+        estimated_cost = token_tracker.calculate_cost(model_name)
+        log.info(f"Token usage summary:\n{token_tracker}")
+
         _save_metadata(
             report_id, excel_row, company_profile, report_md,
             owner=owner, attachments_info=attachments_info,
             is_regeneration=is_regeneration,
+            token_usage_json=token_tracker.to_json(),
+            estimated_cost=estimated_cost,
         )
 
         # Save intermediate results for debugging
@@ -358,7 +382,8 @@ async def run_pipeline(
                 await sse_manager.send_progress(task_id, 4, 6, "步骤4/6：字段回填中...")
                 meta_path = OUTPUT_DIR / f"{report_id}.json"
                 current_meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                updates = await extract_fields(current_meta, report_md, fe_cfg)
+                updates, usage = await extract_fields(current_meta, report_md, fe_cfg)
+                token_tracker.add_usage("field_extractor", usage)
                 if updates:
                     # Protect system fields and locked fields from being overwritten
                     protected_keys = {

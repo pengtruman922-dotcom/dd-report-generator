@@ -206,6 +206,31 @@ const ALL_COLUMNS: ColumnDef[] = [
     defaultVisible: true,
     render: (val) => formatSize(val || 0),
   },
+  {
+    key: "token_usage_json",
+    label: "Token 用量",
+    defaultVisible: false,
+    render: (val) => {
+      if (!val) return <span className="text-gray-400 text-xs">--</span>;
+      try {
+        const usage = JSON.parse(val);
+        const total = Object.values(usage).reduce((sum: number, count: any) => sum + (typeof count === 'number' ? count : 0), 0);
+        return <span className="text-xs text-gray-600">{total.toLocaleString()}</span>;
+      } catch {
+        return <span className="text-gray-400 text-xs">--</span>;
+      }
+    },
+  },
+  {
+    key: "estimated_cost",
+    label: "预估成本",
+    defaultVisible: false,
+    sortable: true,
+    render: (val) => {
+      if (val === null || val === undefined) return <span className="text-gray-400 text-xs">--</span>;
+      return <span className="text-xs text-gray-600">¥{Number(val).toFixed(2)}</span>;
+    },
+  },
   // ── Excel fields (hidden by default) ──
   { key: "province", label: "省", defaultVisible: false },
   { key: "city", label: "市", defaultVisible: false },
@@ -321,9 +346,11 @@ export default function ReportsPage() {
   // Selection
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // Pagination
+  // Pagination (server-side)
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalRecords, setTotalRecords] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
 
   // Delete confirm
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -382,23 +409,53 @@ export default function ReportsPage() {
   }, [columnOrder]);
 
   // Unique owners for admin filter
-  const ownerOptions = useMemo(() => {
-    const owners = new Set<string>();
-    reports.forEach((r) => { if (r.owner) owners.add(r.owner); });
-    return Array.from(owners).sort();
-  }, [reports]);
+  const [ownerOptions, setOwnerOptions] = useState<string[]>([]);
 
   const fetchReports = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await listReports();
+      // Map frontend filter values to backend API values
+      const params: any = {
+        page,
+        page_size: pageSize,
+        sort_by: sortKey,
+        sort_dir: sortDir,
+      };
+
+      if (search) params.search = search;
+      if (statusFilter !== "all") params.status = statusFilter;
+      if (ownerFilter !== "all") params.owner = ownerFilter;
+
+      // Map rating filter to backend format
+      if (ratingFilter !== "all") {
+        if (ratingFilter === "recommended") {
+          params.rating = "推荐";  // Backend will match "强烈推荐" or "推荐"
+        } else if (ratingFilter === "cautious") {
+          params.rating = "谨慎推荐";
+        } else if (ratingFilter === "not_recommended") {
+          params.rating = "不推荐";  // Backend will match "不推荐" or "不建议"
+        }
+      }
+
+      // Note: pushStatusFilter is not supported by backend yet, so we skip it
+
+      const data = await listReports(params);
       setReports(data.reports);
+      setTotalRecords(data.total);
+      setTotalPages(data.total_pages);
+
+      // Extract unique owners for filter dropdown (only on first load or when needed)
+      if (isAdmin && ownerOptions.length === 0) {
+        const owners = new Set<string>();
+        data.reports.forEach((r) => { if (r.owner) owners.add(r.owner); });
+        setOwnerOptions(Array.from(owners).sort());
+      }
     } catch (e: any) {
       setError(e.message);
     }
     setLoading(false);
-  }, []);
+  }, [page, pageSize, search, statusFilter, ratingFilter, ownerFilter, sortKey, sortDir, isAdmin, ownerOptions.length]);
 
   fetchReportsRef.current = fetchReports;
 
@@ -406,68 +463,20 @@ export default function ReportsPage() {
     fetchReports();
   }, [fetchReports]);
 
-  // Filtered + sorted
-  const filtered = useMemo(() => {
-    let list = reports;
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(
-        (r) =>
-          (r.company_name || "").toLowerCase().includes(q) ||
-          (r.project_name || "").toLowerCase().includes(q) ||
-          (r.bd_code || "").toLowerCase().includes(q)
-      );
-    }
-    if (statusFilter !== "all") {
-      list = list.filter((r) => r.status === statusFilter);
-    }
-    if (ratingFilter !== "all") {
-      if (ratingFilter === "recommended")
-        list = list.filter((r) => {
-          const rating = getFinalRating(r);
-          return rating === "强烈推荐" || rating === "推荐";
-        });
-      else if (ratingFilter === "cautious")
-        list = list.filter((r) => getFinalRating(r) === "谨慎推荐");
-      else if (ratingFilter === "not_recommended")
-        list = list.filter((r) => {
-          const rating = getFinalRating(r);
-          return rating === "不推荐" || rating === "不建议";
-        });
-    }
-    if (pushStatusFilter !== "all") {
-      list = list.filter((r) => r.push_status === pushStatusFilter);
-    }
-    if (ownerFilter !== "all") {
-      list = list.filter((r) => r.owner === ownerFilter);
-    }
-    list = [...list].sort((a, b) => {
-      const av = a[sortKey] ?? "";
-      const bv = b[sortKey] ?? "";
-      let cmp: number;
-      if (typeof av === "number" && typeof bv === "number") cmp = av - bv;
-      else cmp = String(av).localeCompare(String(bv));
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-    return list;
-  }, [reports, search, statusFilter, ratingFilter, pushStatusFilter, ownerFilter, sortKey, sortDir]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const paginated = filtered.slice((page - 1) * pageSize, page * pageSize);
-
+  // Reset to page 1 when filters change
   useEffect(() => { setPage(1); }, [search, statusFilter, ratingFilter, pushStatusFilter, ownerFilter, pageSize]);
 
   const allOnPageSelected =
-    paginated.length > 0 && paginated.every((r) => selected.has(r.report_id));
+    reports.length > 0 && reports.every((r) => selected.has(r.report_id));
 
   const toggleAll = () => {
     if (allOnPageSelected) {
       const next = new Set(selected);
-      paginated.forEach((r) => next.delete(r.report_id));
+      reports.forEach((r) => next.delete(r.report_id));
       setSelected(next);
     } else {
       const next = new Set(selected);
-      paginated.forEach((r) => next.add(r.report_id));
+      reports.forEach((r) => next.add(r.report_id));
       setSelected(next);
     }
   };
@@ -638,7 +647,7 @@ export default function ReportsPage() {
   // ── Export Excel (CSV with BOM) ──────────────────────────────
   const handleExportExcel = () => {
     const headers = visibleColumns.map((c) => c.label);
-    const rows = filtered.map((r) =>
+    const rows = reports.map((r) =>
       visibleColumns.map((c) => getCellText(c, r)),
     );
     const BOM = "\uFEFF";
@@ -675,7 +684,7 @@ export default function ReportsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">
-          标的管理 <span className="text-sm font-normal text-gray-400">({reports.length} 份)</span>
+          标的管理 <span className="text-sm font-normal text-gray-400">({totalRecords} 份)</span>
         </h1>
         <button
           onClick={() => navigate("/new")}
@@ -728,7 +737,7 @@ export default function ReportsPage() {
         <div className="flex items-center gap-2 ml-auto">
         <button
           onClick={handleExportExcel}
-          disabled={filtered.length === 0}
+          disabled={reports.length === 0}
           className="px-3 py-1.5 border rounded-lg text-sm text-gray-600 hover:bg-gray-50 flex items-center gap-1 disabled:opacity-30"
           title="导出当前筛选结果为 Excel"
         >
@@ -802,9 +811,9 @@ export default function ReportsPage() {
       )}
 
       {/* Table */}
-      {filtered.length === 0 ? (
+      {reports.length === 0 ? (
         <div className="text-center py-16 text-gray-400">
-          {reports.length === 0 ? "暂无报告，点击「新建报告」开始生成" : "没有符合筛选条件的报告"}
+          {totalRecords === 0 ? "暂无报告，点击「新建报告」开始生成" : "没有符合筛选条件的报告"}
         </div>
       ) : (
         <div className="bg-white rounded-lg shadow overflow-x-auto">
@@ -827,7 +836,7 @@ export default function ReportsPage() {
               </tr>
             </thead>
             <tbody>
-              {paginated.map((r) => (
+              {reports.map((r) => (
                 <tr key={r.report_id} className="border-b group hover:bg-gray-50 transition-colors">
                   <td className="px-3 py-2.5 sticky left-0 z-10 bg-white group-hover:bg-gray-50 transition-colors">
                     <input type="checkbox" checked={selected.has(r.report_id)}
@@ -938,7 +947,7 @@ export default function ReportsPage() {
       })()}
 
       {/* Pagination */}
-      {filtered.length > 0 && (
+      {totalRecords > 0 && (
         <div className="flex items-center justify-between text-sm text-gray-500">
           <div className="flex items-center gap-2">
             <span>每页</span>
@@ -947,9 +956,10 @@ export default function ReportsPage() {
               <option value={10}>10</option>
               <option value={20}>20</option>
               <option value={50}>50</option>
+              <option value={100}>100</option>
             </select>
             <span>条</span>
-            <span className="ml-3">共 {filtered.length} 条记录</span>
+            <span className="ml-3">共 {totalRecords} 条记录</span>
           </div>
           <div className="flex items-center gap-1">
             <button onClick={() => setPage(Math.max(1, page - 1))} disabled={page <= 1}

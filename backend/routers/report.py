@@ -1397,3 +1397,47 @@ def _inline(text: str) -> str:
     # Links
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
     return text
+
+
+# ── Version Management ────────────────────────────────────────────
+
+@router.get("/{report_id}/versions")
+async def list_report_versions(report_id: str, user: dict = Depends(get_current_user)):
+    """List all versions for a report."""
+    _check_report_access(report_id, user)
+    from services.version_manager import list_versions
+    versions = list_versions(report_id)
+    return {"versions": versions, "count": len(versions)}
+
+
+@router.get("/{report_id}/versions/{version_id}")
+async def get_report_version(
+    report_id: str,
+    version_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Get a specific version content."""
+    _check_report_access(report_id, user)
+    from services.version_manager import get_version
+    version = get_version(version_id)
+    if not version or version["report_id"] != report_id:
+        raise HTTPException(404, "Version not found")
+    return version
+
+
+@router.post("/{report_id}/versions/{version_id}/restore")
+async def restore_report_version(
+    report_id: str,
+    version_id: str,
+    user: dict = Depends(get_current_user)
+):
+    """Restore a report from a version."""
+    _check_report_access(report_id, user)
+    from services.version_manager import restore_version
+    try:
+        restored_id = restore_version(version_id, restored_by=user["username"])
+        return {"status": "ok", "report_id": restored_id}
+    except Exception as e:
+        log.exception(f"Failed to restore version {version_id}")
+        raise HTTPException(500, f"恢复失败: {e}")
+

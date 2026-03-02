@@ -3,8 +3,9 @@ import { useParams, useNavigate } from "react-router-dom";
 import { getReport, getDownloadUrl, getPdfDownloadUrl, getChunks } from "../api/client";
 import ReportViewer from "./ReportViewer";
 import ChunkEditor from "./ChunkEditor";
+import VersionHistory from "./VersionHistory";
 
-type Tab = "report" | "chunks";
+type Tab = "report" | "chunks" | "versions";
 
 export default function ReportDetail() {
   const { reportId } = useParams<{ reportId: string }>();
@@ -39,6 +40,15 @@ export default function ReportDetail() {
 
   const handleContentUpdate = (newContent: string) => {
     setContent(newContent);
+  };
+
+  const handleVersionRestore = () => {
+    // Reload report content after version restore
+    if (reportId) {
+      getReport(reportId)
+        .then((data) => setContent(data.content))
+        .catch((e) => alert("重新加载失败: " + e.message));
+    }
   };
 
   if (loading) {
@@ -121,6 +131,16 @@ export default function ReportDetail() {
             <span className="ml-1.5 inline-block w-2 h-2 bg-green-400 rounded-full" />
           )}
         </button>
+        <button
+          onClick={() => setTab("versions")}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
+            tab === "versions"
+              ? "border-blue-600 text-blue-600"
+              : "border-transparent text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          版本历史
+        </button>
       </div>
 
       {tab === "report" && (
@@ -131,6 +151,9 @@ export default function ReportDetail() {
         />
       )}
       {tab === "chunks" && <ChunkEditor reportId={reportId!} />}
+      {tab === "versions" && (
+        <VersionHistory reportId={reportId!} onRestore={handleVersionRestore} />
+      )}
     </div>
   );
 }

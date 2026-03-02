@@ -73,3 +73,74 @@ def list_versions(report_id: str) -> list[dict]:
         return [dict(row) for row in rows]
     finally:
         conn.close()
+
+
+def get_version(version_id: str) -> dict | None:
+    """Get a specific version by version_id."""
+    conn = get_db()
+    try:
+        cursor = conn.cursor()
+        row = cursor.execute(
+            """SELECT version_id, report_id, version_number, content, metadata_json,
+                      created_at, created_by, reason
+               FROM report_versions
+               WHERE version_id = ?""",
+            (version_id,)
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        # Parse metadata_json
+        if result.get("metadata_json"):
+            try:
+                result["metadata"] = json.loads(result["metadata_json"])
+            except:
+                result["metadata"] = None
+        return result
+    finally:
+        conn.close()
+
+
+def restore_version(version_id: str, restored_by: str | None = None) -> str:
+    """Restore a report from a version snapshot.
+
+    Creates a new version backup of current state before restoring.
+    Returns the report_id.
+    """
+    from routers.report import _get_report_paths
+
+    version = get_version(version_id)
+    if not version:
+        raise ValueError(f"Version {version_id} not found")
+
+    report_id = version["report_id"]
+
+    # Create backup of current state before restoring
+    try:
+        create_version(report_id, reason="before_restore", created_by=restored_by)
+    except Exception as e:
+        log.warning(f"Failed to create backup before restore: {e}")
+
+    # Restore content
+    paths = _get_report_paths(report_id)
+    md_path = paths["md"]
+    md_path.write_text(version["content"], encoding="utf-8")
+
+    # Update database metadata if available
+    if version.get("metadata"):
+        conn = get_db()
+        try:
+            meta = version["metadata"]
+            conn.execute(
+                """UPDATE reports SET
+                   file_size = ?, status = 'updated', updated_at = datetime('now','localtime')
+                   WHERE report_id = ?""",
+                (md_path.stat().st_size, report_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    log.info(f"Restored report {report_id} from version {version['version_number']}")
+    return report_id
+

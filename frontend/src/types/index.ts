@@ -107,6 +107,8 @@ export interface ReportMeta {
   push_info?: PushRecord | null;
   owner?: string;
   push_records?: Record<string, PushRecord>;
+  token_usage_json?: string | null;
+  estimated_cost?: number | null;
   [key: string]: any; // allow extra fields
 }
 
