@@ -114,8 +114,8 @@ echo ""
 echo "步骤 7/7: 配置 Supervisor..."
 cat > /etc/supervisor/conf.d/ddreport.conf <<EOF
 [program:ddreport-backend]
-command=$APP_DIR/venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-directory=$APP_DIR
+command=$APP_DIR/venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000
+directory=$APP_DIR/backend
 user=$APP_USER
 autostart=true
 autorestart=true
