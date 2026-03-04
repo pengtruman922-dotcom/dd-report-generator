@@ -24,13 +24,24 @@ echo "步骤 1/7: 安装系统依赖..."
 if command -v apt &> /dev/null; then
     # Ubuntu/Debian
     apt update
-    apt install -y python3.10 python3.10-venv python3-pip nodejs npm git nginx supervisor curl
+    apt install -y python3 python3-venv python3-pip git nginx supervisor curl
+
+    # 安装 Node.js 18 (通过 NodeSource)
+    if ! command -v node &> /dev/null; then
+        echo "正在安装 Node.js 18..."
+        curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+        apt install -y nodejs
+    else
+        echo "Node.js 已安装: $(node --version)"
+    fi
 elif command -v yum &> /dev/null; then
     # CentOS/RHEL
     yum update -y
-    yum install -y python3.10 python3-pip git nginx supervisor curl
-    curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
-    yum install -y nodejs
+    yum install -y python3 python3-pip git nginx supervisor curl
+    if ! command -v node &> /dev/null; then
+        curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+        yum install -y nodejs
+    fi
 else
     echo "不支持的操作系统"
     exit 1
