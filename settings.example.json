@@ -1,0 +1,78 @@
+{
+  "ai_config": {
+    "extractor": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3-max"
+    },
+    "researcher": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3-max"
+    },
+    "writer": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3-max"
+    },
+    "field_extractor": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3-max"
+    },
+    "chunker": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3-max"
+    }
+  },
+  "fastgpt_config": {
+    "enabled": false,
+    "api_url": "",
+    "api_key": "",
+    "dataset_id": ""
+  },
+  "tools_config": {
+    "search": {
+      "active_provider": "bocha",
+      "fallback_chain": ["bocha", "baidu", "bing_china", "duckduckgo"],
+      "providers": {
+        "duckduckgo": {},
+        "bing_china": {
+          "api_key": "填入你的Bing API Key（可选）"
+        },
+        "baidu": {
+          "api_key": "填入你的百度API Key（可选）",
+          "secret_key": "填入你的百度Secret Key（可选）"
+        },
+        "bocha": {
+          "api_key": "填入你的Bocha API Key"
+        }
+      }
+    },
+    "scraper": {
+      "active_provider": "jina_reader",
+      "fallback_chain": ["jina_reader", "local_scraper"],
+      "providers": {
+        "jina_reader": {},
+        "local_scraper": {
+          "timeout": 30,
+          "content_limit": 8000
+        }
+      }
+    },
+    "datasource": {
+      "active_providers": [],
+      "providers": {
+        "cninfo": {},
+        "akshare": {},
+        "tianyancha": {
+          "api_key": "填入你的天眼查API Key（可选）"
+        },
+        "gsxt": {
+          "timeout": 30
+        }
+      }
+    }
+  }
+}

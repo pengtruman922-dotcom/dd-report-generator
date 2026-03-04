@@ -2,17 +2,42 @@
 uploads/
 outputs/
 data/
+*.db
+*.sqlite
+*.sqlite3
 
 # Build artifacts
 frontend/dist/
 frontend/node_modules/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+ENV/
 
 # Windows artifacts
 backend/NUL
+Thumbs.db
+desktop.ini
 
 # Environment / secrets
 .env
 *.env
 settings.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store

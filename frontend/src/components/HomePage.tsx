@@ -295,11 +295,26 @@ export default function HomePage() {
 
         {inputMode === "excel" && (
           <>
+            {/* Template download button */}
+            <div className="mb-3">
+              <a
+                href="/api/upload/template"
+                download
+                className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 hover:underline"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                下载Excel模板
+              </a>
+            </div>
+
             <FileUpload
               label="上传卖家表 (.xlsx)"
               accept=".xlsx,.xls"
               onFiles={handleExcelUpload}
               disabled={uploading}
+              hint="支持 .xlsx、.xls 格式"
             />
             {companies.length > 0 && (
               <p className="text-sm text-green-600 mt-2">
@@ -432,6 +447,7 @@ export default function HomePage() {
             multiple
             onFiles={handleAttachments}
             disabled={uploading}
+            hint="支持 PDF、Word、PPT、Markdown 格式"
           />
           {attachmentNames.length > 0 && (
             <div className="mt-3 space-y-1">

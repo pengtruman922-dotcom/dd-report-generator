@@ -10,15 +10,95 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import UPLOAD_DIR
 from db import get_db, get_next_bd_code
-from parsers.excel_parser import parse_excel, get_company_list, FIELD_LABELS
+from parsers.excel_parser import parse_excel, get_company_list, FIELD_LABELS, COLUMN_MAP
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+@router.get("/template")
+async def download_template():
+    """Generate and download an Excel template with all 26 column headers."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "标的信息模板"
+
+    # Get all 26 Chinese column names from COLUMN_MAP
+    headers = list(COLUMN_MAP.keys())
+
+    # Write headers (bold)
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = Font(bold=True)
+
+    # Add example row
+    example_data = {
+        "标的编码": "BD001",
+        "标的主体": "示例科技有限公司",
+        "标的项目": "AI智能平台项目",
+        "营业收入（元）": "50000000",
+        "估值（元）": "200000000",
+        "净利润（元）": "8000000",
+        "行业": "人工智能",
+        "上市编号": "",
+        "估值日期": "2026-01-01",
+        "官网地址": "https://example.com",
+        "上市情况": "未上市",
+        "标的描述": "专注于AI技术研发的高新技术企业",
+        "标的主体公司简介": "成立于2020年，主营AI算法研发与应用",
+        "省": "北京市",
+        "市": "北京市",
+        "区": "海淀区",
+        "营业收入": "5000万",
+        "净利润": "800万",
+        "行业标签": "人工智能,大数据",
+        "推介情况": "已推介",
+        "是否已交易": "否",
+        "负责人主属部门": "投资部",
+        "归属部门": "投资部",
+        "标的介绍材料附件": "",
+        "标的公司年度报告摘要附件": "",
+        "备注": "重点关注项目",
+    }
+
+    for col_idx, header in enumerate(headers, start=1):
+        value = example_data.get(header, "")
+        ws.cell(row=2, column=col_idx, value=value)
+
+    # Auto-adjust column widths
+    for col_idx in range(1, len(headers) + 1):
+        col_letter = get_column_letter(col_idx)
+        max_length = len(headers[col_idx - 1])
+        ws.column_dimensions[col_letter].width = min(max_length + 2, 30)
+
+    # Freeze first row
+    ws.freeze_panes = "A2"
+
+    # Save to BytesIO
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=标的信息模板.xlsx"
+        }
+    )
 
 
 # ── Session persistence helpers (SQLite) ─────────────────────
