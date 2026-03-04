@@ -10,8 +10,8 @@ echo "=========================================="
 # 配置变量（请根据实际情况修改）
 APP_USER="ddreport"
 APP_DIR="/home/$APP_USER/dd-report-generator"
-GITHUB_REPO="https://github.com/你的用户名/dd-report-generator.git"  # 修改为你的仓库地址
-DOMAIN_OR_IP="你的域名或IP"  # 修改为你的域名或服务器IP
+GITHUB_REPO="https://github.com/pengtruman922-dotcom/dd-report-generator.git"
+DOMAIN_OR_IP="8.134.115.126"
 
 # 检查是否为 root 用户
 if [ "$EUID" -ne 0 ]; then
