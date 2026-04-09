@@ -9,20 +9,22 @@ const PROTECTED_KEYS = new Set([
   "push_status", "push_info", "attachments",
 ]);
 
+const RATING_OPTIONS = ["强烈推荐", "推荐", "谨慎推荐", "不推荐", "不建议"];
+
 // Editable fields with labels
-const EDITABLE_FIELDS: { key: string; label: string; textarea?: boolean }[] = [
+const EDITABLE_FIELDS: { key: string; label: string; textarea?: boolean; select?: string[] }[] = [
   { key: "company_name", label: "标的主体" },
   { key: "project_name", label: "标的项目" },
   { key: "industry", label: "行业" },
+  { key: "manual_rating", label: "人工评级", select: RATING_OPTIONS },
+  { key: "manual_rating_note", label: "评级备注" },
   { key: "province", label: "省" },
   { key: "city", label: "市" },
   { key: "district", label: "区" },
   { key: "is_listed", label: "上市情况" },
   { key: "stock_code", label: "上市编号" },
   { key: "revenue", label: "营业收入" },
-  { key: "revenue_yuan", label: "营业收入（元）" },
   { key: "net_profit", label: "净利润" },
-  { key: "net_profit_yuan", label: "净利润（元）" },
   { key: "valuation_yuan", label: "估值（元）" },
   { key: "valuation_date", label: "估值日期" },
   { key: "website", label: "官网地址" },
@@ -99,6 +101,17 @@ export default function EditReportModal({ report, onClose, onSaved }: Props) {
                     rows={2}
                     className="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
                   />
+                ) : f.select ? (
+                  <select
+                    value={form[f.key]}
+                    onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                    className="w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+                  >
+                    <option value="">--</option>
+                    {f.select.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
                 ) : (
                   <input
                     type="text"

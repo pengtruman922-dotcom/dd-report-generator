@@ -1,0 +1,93 @@
+{
+  "company_name": "中大咨询集团",
+  "business_info": {
+    "registration": "未找到明确的工商注册信息。可能存在多个名称相似的实体，或该公司以其他正式注册名称运营。",
+    "business_scope": "根据公司名称推断，可能涵盖管理咨询、战略咨询、人力资源咨询等专业服务。",
+    "branches": "无公开信息。",
+    "key_personnel": "无公开信息。"
+  },
+  "financial_info": {
+    "summary": "作为非上市公司，中大咨询集团未披露详细的财务数据。公开渠道未能查询到其具体的营收、利润或融资估值信息。",
+    "revenue_data": "无公开数据。",
+    "profit_data": "无公开数据。",
+    "other_financial": "无公开数据。",
+    "historical_data": []
+  },
+  "ipo_info": {
+    "status": "未上市，无公开IPO计划信息。",
+    "timeline": [],
+    "details": "无相关信息。",
+    "termination_reason": "不适用。"
+  },
+  "industry_info": {
+    "market_size": "中国管理咨询行业市场规模在数千亿人民币级别，并持续增长。",
+    "growth_rate": "受益于企业数字化转型和管理升级需求，行业保持稳健增长。",
+    "trends": [
+      "数字化转型咨询需求激增",
+      "ESG（环境、社会、治理）咨询成为新热点",
+      "本土咨询公司市场份额逐步提升",
+      "行业整合加速，头部效应显现",
+      "客户对咨询成果的落地性和实效性要求更高"
+    ],
+    "policies": "国家鼓励现代服务业发展，支持高端专业服务业能力建设。",
+    "key_drivers": "企业降本增效、战略转型、国际化及合规需求是主要驱动因素。"
+  },
+  "competition": {
+    "main_competitors": [
+      {
+        "name": "和君咨询",
+        "stock_code": "",
+        "market_cap": "",
+        "revenue": "",
+        "feature": "国内大型综合性咨询公司"
+      },
+      {
+        "name": "正略钧策",
+        "stock_code": "",
+        "market_cap": "",
+        "revenue": "",
+        "feature": "老牌本土管理咨询公司"
+      },
+      {
+        "name": "麦肯锡 (McKinsey)",
+        "stock_code": "非上市公司",
+        "market_cap": "",
+        "revenue": "",
+        "feature": "国际顶级战略咨询公司"
+      },
+      {
+        "name": "波士顿咨询 (BCG)",
+        "stock_code": "非上市公司",
+        "market_cap": "",
+        "revenue": "",
+        "feature": "国际顶级战略咨询公司"
+      },
+      {
+        "name": "埃森哲 (Accenture)",
+        "stock_code": "ACN",
+        "market_cap": "约2000亿美元",
+        "revenue": "约650亿美元 (2023财年)",
+        "feature": "全球领先的技术与管理咨询巨头"
+      }
+    ],
+    "market_position": "无法确定中大咨询集团在行业中的具体市场地位。可能是一家区域性或专注于特定领域的咨询公司。",
+    "competitive_landscape": "咨询服务行业竞争激烈，呈现国际巨头、全国性本土龙头和众多中小型精品咨询公司并存的格局。",
+    "market_share": "无公开数据。"
+  },
+  "risk_info": {
+    "legal_risks": "无公开的诉讼、处罚或违规记录。",
+    "business_risks": "作为非知名咨询公司，可能面临品牌知名度不高、客户获取成本高、人才竞争激烈等风险。",
+    "financial_risks": "无公开信息。",
+    "news_sentiment": "近期无相关舆情报道。"
+  },
+  "recent_news": [],
+  "customer_info": {
+    "key_customers": "无公开信息。",
+    "customer_changes": "无公开信息。"
+  },
+  "valuation_reference": {
+    "comparable_companies": "可参考上市公司如埃森哲(ACN)、IBM等，但业务模式和规模差异巨大。本土非上市咨询公司通常按项目收费，估值多基于未来现金流或市销率(PS)进行估算。",
+    "industry_multiples": "成熟咨询公司的市销率(PS)通常在1x-3x之间，具体取决于利润率、客户粘性和增长前景。"
+  },
+  "sources": []
+}

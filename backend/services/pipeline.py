@@ -320,7 +320,34 @@ async def run_pipeline(
 
         research_data, usage = await research(company_profile, res_cfg, on_progress=on_research_progress, tools_config=tools_cfg)
         token_tracker.add_usage("researcher", usage)
-        await sse_manager.send_progress(task_id, 2, 6, "步骤2完成：联网研究已完成")
+
+        # ── Assess research quality ───────────────────────────────────
+        # If core fields are all empty/missing, flag as insufficient
+        def _is_empty(val):
+            if val is None: return True
+            if isinstance(val, str) and not val.strip(): return True
+            if isinstance(val, (list, dict)) and not val: return True
+            s = str(val).strip()
+            return s in ("", "无", "未披露", "未查询到", "无相关信息", "无公开数据", "[]", "{}")
+
+        biz = research_data.get("business_info", {})
+        fin = research_data.get("financial_info", {})
+        core_empty = (
+            _is_empty(biz.get("registration"))
+            and _is_empty(biz.get("business_scope"))
+            and _is_empty(biz.get("key_personnel"))
+            and _is_empty(fin.get("revenue_data"))
+            and _is_empty(fin.get("profit_data"))
+            and not research_data.get("recent_news")
+        )
+        research_quality = "insufficient" if core_empty else "normal"
+        if research_quality == "insufficient":
+            await sse_manager.send_progress(
+                task_id, 2, 6,
+                "⚠️ 步骤2：未能获取到该公司的有效公开信息，报告将以信息缺口梳理为主"
+            )
+        else:
+            await sse_manager.send_progress(task_id, 2, 6, "步骤2完成：联网研究已完成")
 
         # ── Step 3: Write ────────────────────────────────────────────
         await task_manager.update_task_status(task_id, TaskStatus.RUNNING, current_step=3)
@@ -337,7 +364,8 @@ async def run_pipeline(
 
         report_md, usage = await write_report(
             company_profile, research_data, wrt_cfg, attachment_items,
-            on_stream_chunk=on_stream_chunk
+            on_stream_chunk=on_stream_chunk,
+            research_quality=research_quality,
         )
         token_tracker.add_usage("writer", usage)
         await sse_manager.send_progress(task_id, 3, 6, "步骤3完成：报告已生成")
@@ -400,6 +428,25 @@ async def run_pipeline(
                         json.dumps(current_meta, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
+                    # BUG-002 fix: sync field_extractor updates back to SQLite reports table
+                    try:
+                        from db import get_db as _get_db
+                        _conn = _get_db()
+                        _updatable = {
+                            k: v for k, v in current_meta.items()
+                            if k not in protected_keys and isinstance(v, (str, int, float, type(None)))
+                        }
+                        _set_clause = ", ".join(f"{k} = ?" for k in _updatable)
+                        _values = list(_updatable.values()) + [report_id]
+                        if _set_clause:
+                            _conn.execute(
+                                f"UPDATE reports SET {_set_clause} WHERE report_id = ?",
+                                _values,
+                            )
+                            _conn.commit()
+                        _conn.close()
+                    except Exception as _db_err:
+                        log.warning(f"Step4 DB sync failed (non-critical): {_db_err}")
                     await sse_manager.send_progress(
                         task_id, 4, 6, f"步骤4完成：已回填 {applied} 个字段"
                     )

@@ -73,7 +73,7 @@ async def generate_chunk_indexes(
         {"role": "user", "content": user_message},
     ]
 
-    response = await chat_completion(
+    response, _usage = await chat_completion(
         client, ai_config["model"], messages, temperature=0.2
     )
     content = response.choices[0].message.content.strip()

@@ -400,3 +400,54 @@ export async function restoreVersion(reportId: string, versionId: string): Promi
   if (!res.ok) throw new Error(await res.text());
 }
 
+// ── Intake Agent ──
+
+export async function parseIntake(
+  text: string,
+  urls: string[],
+  files: File[],
+  mode: "auto" | "manual",
+): Promise<import("../types").IntakeParseResult> {
+  const form = new FormData();
+  form.append("text", text);
+  form.append("urls", JSON.stringify(urls));
+  form.append("mode", mode);
+  for (const f of files) form.append("files", f);
+  const res = await authFetch(`${BASE}/intake/parse`, { method: "POST", body: form });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function executeIntake(
+  operation: import("../types").IntakeOperation,
+  inputSources: string[],
+  forceFullResearch = false,
+): Promise<import("../types").IntakeExecuteResult> {
+  const res = await authFetch(`${BASE}/intake/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ operation, input_sources: inputSources, force_full_research: forceFullResearch }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getIntakeLogs(
+  reportId: string,
+): Promise<{ logs: import("../types").IntakeLog[]; count: number }> {
+  const res = await authFetch(`${BASE}/intake/logs/${reportId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function cancelIntakeTask(taskId: string): Promise<{ ok: boolean; rolled_back: boolean }> {
+  const res = await authFetch(`${BASE}/intake/cancel/${taskId}`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function listIntakeTasks(): Promise<{ tasks: import("../types").IntakeTaskStatus[] }> {
+  const res = await authFetch(`${BASE}/intake/tasks`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

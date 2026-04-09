@@ -4,8 +4,9 @@ import { getReport, getDownloadUrl, getPdfDownloadUrl, getChunks } from "../api/
 import ReportViewer from "./ReportViewer";
 import ChunkEditor from "./ChunkEditor";
 import VersionHistory from "./VersionHistory";
+import IntakeLogs from "./IntakeLogs";
 
-type Tab = "report" | "chunks" | "versions";
+type Tab = "report" | "chunks" | "versions" | "intake_logs";
 
 export default function ReportDetail() {
   const { reportId } = useParams<{ reportId: string }>();
@@ -141,6 +142,16 @@ export default function ReportDetail() {
         >
           版本历史
         </button>
+        <button
+          onClick={() => setTab("intake_logs")}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
+            tab === "intake_logs"
+              ? "border-blue-600 text-blue-600"
+              : "border-transparent text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          更新记录
+        </button>
       </div>
 
       {tab === "report" && (
@@ -154,6 +165,7 @@ export default function ReportDetail() {
       {tab === "versions" && (
         <VersionHistory reportId={reportId!} onRestore={handleVersionRestore} />
       )}
+      {tab === "intake_logs" && <IntakeLogs reportId={reportId!} />}
     </div>
   );
 }

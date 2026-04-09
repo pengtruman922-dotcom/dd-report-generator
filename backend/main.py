@@ -12,6 +12,7 @@ from db import init_db
 from routers import upload, report, settings, tasks
 from routers.auth_router import router as auth_router
 from routers.tools import router as tools_router
+from routers.intake import router as intake_router
 from services.task_manager import task_manager
 from services.pipeline import run_pipeline
 
@@ -52,6 +53,7 @@ app.include_router(report.router, prefix="/api/report", tags=["report"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(tools_router, prefix="/api/tools", tags=["tools"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+app.include_router(intake_router, prefix="/api/intake", tags=["intake"])
 
 
 @app.get("/api/health")

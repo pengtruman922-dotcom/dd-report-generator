@@ -42,6 +42,15 @@ DEFAULT_AI_CONFIG = {
         "api_key": "",
         "model": "qwen3-max",
     },
+    "intake_agent": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key": "",
+        "model": "qwen3.5-plus",
+        "max_crawl_depth": 3,
+        "default_mode": "auto",
+        "core_fields_trigger_research": ["description", "company_intro"],
+        "research_data_expire_days": 90,
+    },
 }
 
 # Default FastGPT config (no hardcoded keys)

@@ -1,212 +1,263 @@
 # 尽调报告生成器 (DD Report Generator)
 
-基于 AI 的智能尽职调查报告生成系统，支持 Excel 批量导入、附件解析、多步骤 AI 分析和 Markdown 报告输出。
+基于 AI 的智能尽职调查报告生成系统。支持 Excel/手动录入 → 6步 AI 流水线 → Markdown 报告输出 → FastGPT 知识库推送。
 
-## 功能特性
+---
 
-### 核心功能
-- ✅ **Excel 批量导入**：支持 26 列标的信息表，自动解析公司数据
-- ✅ **Excel 模板下载**：一键下载标准格式模板，降低新用户上手门槛
-- ✅ **手动输入模式**：无需 Excel，直接在线填写标的信息
-- ✅ **附件解析**：支持 PDF、Word、PPT、Markdown 文档自动提取
-- ✅ **OCR 识别**：图片型 PDF 自动 OCR 文字识别
-- ✅ **多步骤 AI 分析**：
-  - 信息提取（Extractor）
-  - 网络研究（Researcher）
-  - 报告撰写（Writer）
-- ✅ **实时进度推送**：SSE 实时显示生成进度和日志
-- ✅ **批量生成**：支持一次性生成多份报告
-- ✅ **报告管理**：查看历史报告、编辑、删除、导出 Word
+## 功能概览
 
-### 增强体验
-- 🎨 拖拽上传：支持文件拖拽，带视觉反馈和动画效果
-- 📄 文件预览：上传后显示文件名、大小，可清除重选
-- 💡 格式提示：明确显示支持的文件格式
-- 🔄 报告重生成：可基于历史报告重新生成
+### v1.0（已上线）
+- **Excel 批量导入**：26列标准模板，自动解析；一键下载模板
+- **手动录入模式**：无需 Excel，直接在线填写
+- **附件解析**：PDF（含 OCR）、Word、PPT、Markdown 自动提取
+- **6步 AI 流水线**（实时 SSE 进度推送）：
+  1. Extractor：信息提取 → CompanyProfile JSON
+  2. Researcher：联网调研（最多18轮，自适应）
+  3. Writer：生成完整尽调报告（~5000-10000字 Markdown）
+  4. FieldExtractor：字段回填到数据库
+  5. Chunker：规则分块 + AI 生成搜索标签
+  6. FastGPT Push：推送到知识库
+- **批量生成**：一次性生成多份报告，并发执行
+- **报告管理**：列表搜索/筛选/分页、在线编辑、版本历史、FastGPT 批量推送
+- **任务持久化**：服务重启后自动恢复进行中的任务
+- **搜索容灾**：Bocha → Baidu → Bing → DuckDuckGo 自动 fallback
+- **用户权限**：多用户登录，admin 角色管理
+
+### v2.0（开发中）
+- **智能录入 Agent**：直接投入聊天记录/截图/文档/链接，AI 自动解析为操作指令
+- **轻量更新流程**：仅字段变化时跳过重调研，Step3' 直接重写报告（节省 5-15 分钟）
+- **更新记录 Tab**：每次操作的完整数据处理日志
+
+---
 
 ## 技术栈
 
-### 后端
-- **框架**：FastAPI + Uvicorn
-- **AI 模型**：阿里云 DashScope (Qwen3-Max)
-- **文档解析**：
-  - Excel: `openpyxl`, `pandas`
-  - PDF: `PyMuPDF`, `pdfplumber`
-  - OCR: `rapidocr-onnxruntime`
-  - Word: `python-docx`
-  - PPT: `python-pptx`
-- **搜索工具**：Bocha、Baidu、Bing、DuckDuckGo（支持 fallback）
-- **网页抓取**：Jina Reader、本地 Scraper
-- **数据库**：SQLite（会话和报告持久化）
+| 层 | 技术 |
+|----|------|
+| 后端框架 | FastAPI + Uvicorn + SSE-Starlette |
+| AI 模型 | 阿里云 DashScope（Qwen3-Max / qwen3.5-plus） |
+| 数据库 | SQLite（bcrypt 密码哈希） |
+| 文档解析 | PyMuPDF、pdfplumber、rapidocr、python-docx、python-pptx |
+| 搜索工具 | Bocha、Baidu、Bing、DuckDuckGo（fallback 链） |
+| 网页抓取 | Jina Reader、本地 Scraper |
+| 数据源 | cninfo（巨潮）、akshare、tianyancha、gsxt |
+| 前端框架 | React 19 + TypeScript + Vite |
+| 路由 | React Router v7 |
+| 样式 | Tailwind CSS |
 
-### 前端
-- **框架**：React 18 + TypeScript
-- **路由**：React Router v6
-- **样式**：Tailwind CSS
-- **构建**：Vite
-- **实时通信**：Server-Sent Events (SSE)
+---
 
 ## 快速开始
 
-### 本地开发
+### 前置条件
 
-#### 1. 克隆仓库
+- Python 3.11+
+- Node.js 18+
+- 阿里云 DashScope API Key（必须）
+- Bocha 搜索 API Key（可选，有 fallback）
 
-```bash
-git clone https://github.com/你的用户名/dd-report-generator.git
-cd dd-report-generator
-```
-
-#### 2. 配置后端
+### 1. 配置
 
 ```bash
-# 创建虚拟环境
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 安装依赖
-pip install -r backend/requirements.txt
-
-# 配置 API keys
 cp settings.example.json settings.json
-# 编辑 settings.json，填入你的 API keys
+# 编辑 settings.json，填入 API keys（最少填 ai_config 下的 api_key 和 base_url）
 ```
 
-#### 3. 配置前端
-
-```bash
-cd frontend
-npm install
-```
-
-#### 4. 启动服务
-
-```bash
-# 终端 1: 启动后端
-cd dd-report-generator
-source venv/bin/activate
-python -m uvicorn backend.main:app --reload --port 8000
-
-# 终端 2: 启动前端
-cd dd-report-generator/frontend
-npm run dev
-```
-
-访问 http://localhost:5173
-
-### 生产部署
-
-详细部署指南请参考 [DEPLOYMENT.md](./DEPLOYMENT.md)
-
-#### 快速部署到阿里云（推荐）
-
-1. **推送代码到 GitHub**
-
-```bash
-git add .
-git commit -m "准备部署"
-git push origin main
-```
-
-2. **在服务器上运行自动部署脚本**
-
-```bash
-# 下载部署脚本
-wget https://raw.githubusercontent.com/你的用户名/dd-report-generator/main/deploy.sh
-
-# 修改脚本中的配置变量
-nano deploy.sh
-# 修改: GITHUB_REPO, DOMAIN_OR_IP
-
-# 运行部署
-sudo bash deploy.sh
-```
-
-3. **配置 API keys**
-
-```bash
-sudo nano /home/ddreport/dd-report-generator/settings.json
-# 填入你的 API keys
-
-# 重启服务
-sudo supervisorctl restart ddreport-backend
-```
-
-4. **访问应用**
-
-浏览器打开 `http://你的服务器IP`
-
-## 配置说明
-
-### settings.json 示例
+`settings.json` 最小配置示例：
 
 ```json
 {
   "ai_config": {
-    "extractor": {
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key": "sk-xxx",
-      "model": "qwen3-max"
-    },
-    "researcher": {
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key": "sk-xxx",
-      "model": "qwen3-max"
-    },
-    "writer": {
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key": "sk-xxx",
-      "model": "qwen3-max"
-    }
+    "extractor":       { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-xxx", "model": "qwen3-max" },
+    "researcher":      { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-xxx", "model": "qwen3-max" },
+    "writer":          { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-xxx", "model": "qwen3-max" },
+    "field_extractor": { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-xxx", "model": "qwen3-max" },
+    "chunker":         { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-xxx", "model": "qwen3-max" },
+    "intake_agent":    { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-xxx", "model": "qwen3.5-plus" }
   },
   "tools_config": {
-    "search": {
-      "active_provider": "bocha",
-      "fallback_chain": ["bocha", "baidu", "bing_china"],
-      "providers": {
-        "bocha": {
-          "api_key": "your-bocha-key"
-        },
-        "baidu": {
-          "api_key": "your-baidu-key",
-          "secret_key": "your-baidu-secret"
-        }
-      }
-    },
-    "scraper": {
-      "active_provider": "jina_reader"
-    }
+    "search":  { "active_provider": "duckduckgo", "fallback_chain": ["duckduckgo"] },
+    "scraper": { "active_provider": "jina_reader" }
+  },
+  "fastgpt_config": { "enabled": false }
+}
+```
+
+### 2. 安装依赖
+
+```bash
+# 后端
+pip install -r backend/requirements.txt
+
+# 前端
+cd frontend && npm install
+```
+
+### 3. 启动（Windows）
+
+```bat
+start.bat
+```
+
+脚本自动启动后端（:8000）+ 前端（:5173）并打开浏览器。
+
+### 3. 启动（其他平台）
+
+```bash
+# 终端 1：后端
+python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload
+
+# 终端 2：前端
+cd frontend && npm run dev
+```
+
+访问 http://localhost:5173，默认账号：`admin` / `admin123`（首次登录强制改密）
+
+---
+
+## 生产部署
+
+参考 [DEPLOYMENT.md](./DEPLOYMENT.md)（Linux/阿里云，Nginx + Supervisor）。
+
+---
+
+## 项目结构
+
+```
+dd-report-generator/
+├── backend/
+│   ├── main.py              # FastAPI 入口，注册所有 router
+│   ├── config.py            # 全局常量（路径、AI 默认配置、搜索配置）
+│   ├── db.py                # SQLite schema（users/sessions/reports/tasks/intake_logs 等）
+│   ├── auth.py              # JWT token 验证中间件
+│   ├── agents/              # AI Agent（每个步骤一个文件）
+│   │   ├── base_agent.py    # AsyncOpenAI 客户端封装
+│   │   ├── extractor.py     # Step1：信息提取
+│   │   ├── researcher.py    # Step2：联网调研（tool-loop，自适应迭代）
+│   │   ├── writer.py        # Step3：报告撰写（流式输出）
+│   │   ├── field_extractor.py # Step4：字段回填
+│   │   ├── chunker.py       # Step5：AI 索引标签生成
+│   │   └── intake_agent.py  # v2.0 录入 Agent（多模态 + 意图解析）
+│   ├── prompts/             # 各 Agent 的系统提示词（与 agents/ 一一对应）
+│   ├── parsers/             # 文档解析器（excel/pdf/docx/pptx/md + OCR）
+│   ├── services/
+│   │   ├── pipeline.py      # 6步流水线编排
+│   │   ├── light_update_pipeline.py  # v2.0 轻量更新（Step3'+4+5+6）
+│   │   ├── task_manager.py  # 任务生命周期管理（SQLite 持久化 + 崩溃恢复）
+│   │   ├── sse_manager.py   # SSE 事件广播
+│   │   ├── fastgpt_uploader.py  # FastGPT 知识库推送客户端
+│   │   ├── chunker.py       # 规则分块（按中文数字章节标题）
+│   │   ├── version_manager.py   # 报告版本快照管理
+│   │   └── token_tracker.py     # Token 用量 & 费用统计
+│   ├── tools/               # 搜索/抓取/数���源工具（含 fallback 包装器）
+│   │   ├── fallback.py      # FallbackToolProvider：自动切换 provider
+│   │   ├── registry.py      # 工具注册表
+│   │   ├── bocha_search.py / baidu_search.py / bing_search.py / duckduckgo_search.py
+│   │   ├── jina_reader.py / local_scraper.py
+│   │   └── cninfo.py / akshare_data.py / tianyancha.py / gsxt_scraper.py
+│   ├── routers/
+│   │   ├── upload.py        # Excel 上传/解析、手动录入、附件、模板下载
+│   │   ├── report.py        # 报告 CRUD、生成触发、SSE 流、版本、FastGPT 推送
+│   │   ├── intake.py        # v2.0 录入 Agent（/parse、/execute、/logs）
+│   │   ├── tasks.py         # 任务列表/取消/清理
+│   │   ├── settings.py      # AI 配置读写（admin）
+│   │   ├── tools.py         # 工具配置读写（admin）
+│   │   └── auth_router.py   # 登录/登出/用户管理
+│   ├── migrations/          # 一次性数据迁移脚本（历史用，已执行）
+│   ├── tests/               # pytest 自动化测试（83条）
+│   └── requirements.txt
+├── frontend/
+│   └── src/
+│       ├── App.tsx           # 路由根
+│       ├── api/client.ts     # HTTP 请求封装
+│       ├── contexts/AuthContext.tsx
+│       ├── hooks/useSSE.ts   # SSE 订阅 hook
+│       ├── types/index.ts    # TypeScript 类型定义
+│       └── components/       # 所有页面与组件（见下）
+├── docs/
+│   ├── reliability.md        # 搜索容灾 & 自适应迭代设计说明
+│   └── testing.md            # 测试套件说明
+├── .project/
+│   ├── ROADMAP.md            # 项目管理主索引（功能进度 + Bug 追踪）
+│   └── design/
+│       └── v2-smart-intake.md  # v2.0 详细设计文档
+├── settings.example.json     # 配置模板
+├── settings.json             # 运行时配置（gitignored，含 API keys）
+├── start.bat                 # Windows 一键启动脚本
+├── deploy.sh                 # Linux 自动部署脚本（阿里云）
+├── DEPLOYMENT.md             # 生产部署详细指南
+└── data/users.db             # SQLite 数据库（gitignored）
+```
+
+### 前端组件一览
+
+| 组件 | 功能 |
+|------|------|
+| `HomePage.tsx` | 主录入页（Excel / 手动 两种模式） |
+| `ReportsPage.tsx` | 报告列表（搜索、筛选、分页） |
+| `ReportDetail.tsx` | 报告详情（内容 / 分块 / 版本历史 / 更新记录 四个 Tab） |
+| `PipelineProgress.tsx` | 6步（或3步轻量）进度面板（SSE 实时） |
+| `IntakeAgent.tsx` | v2.0 录入 Agent 输入区 + 手动模式预览卡 |
+| `IntakeLogs.tsx` | v2.0 更新记录历史列表 |
+| `BatchProgress.tsx` | 批量生成进度 |
+| `SettingsPanel.tsx` | AI 配置（6个 Agent + FastGPT） |
+| `ToolSettingsPanel.tsx` | 搜索/抓取/数据源配置 |
+| `ChunkEditor.tsx` | 分块内容编辑 |
+| `VersionHistory.tsx` | 版本列表 + 回滚 |
+| `AccountManager.tsx` | 用户管理（admin） |
+
+---
+
+## 关键配置说明
+
+### 搜索 Provider（settings.json）
+
+```json
+"search": {
+  "active_provider": "bocha",
+  "fallback_chain": ["bocha", "baidu", "bing_china", "duckduckgo"],
+  "providers": {
+    "bocha":     { "api_key": "xxx" },
+    "baidu":     { "api_key": "xxx", "secret_key": "xxx" },
+    "duckduckgo": { "proxy": "http://127.0.0.1:7890" }
   }
 }
 ```
 
-## 使用指南
+无 API key 时 `duckduckgo` 可作为免费 fallback，需代理访问。
 
-### 1. Excel 模式（批量）
+### 研究迭代次数（config.py）
 
-1. 点击"下载Excel模板"获取标准格式模板
-2. 填写标的信息（至少填写：标的编码、标的主体、标的项目）
-3. 上传填好的 Excel 文件
-4. 选择目标项目（单个或批量）
-5. 上传附件（可选）
-6. 点击"生成报告"
+```python
+RESEARCH_ITERATIONS = {"listed": 10, "unlisted": 18, "default": 15}
+SEARCH_QUALITY_THRESHOLD = 0.3   # 低于此分数自动切换 provider
+MAX_TOOL_ITERATIONS = 15
+```
 
-### 2. 手动输入模式（单个）
+### FastGPT（settings.json）
 
-1. 切换到"手动输入"标签
-2. 填写必填字段（标的主体、标的项目）
-3. 填写其他可选字段
-4. 点击"确认提交"
-5. 上传附件（可选）
-6. 点击"生成报告"
+```json
+"fastgpt_config": {
+  "enabled": true,
+  "base_url": "http://your-fastgpt:3100",
+  "api_key": "fastgpt-xxx",
+  "dataset_id": "xxx"
+}
+```
 
-### 3. 查看和管理报告
+---
 
-- 点击顶部"报告列表"查看所有历史报告
-- 支持搜索、筛选、排序
-- 可编辑报告内容
-- 可导出为 Word 文档
-- 可重新生成报告
+## 运行测试
+
+```bash
+cd backend
+pip install pytest pytest-asyncio
+pytest tests/ -v
+```
+
+共 83 条自动化测试，覆盖：搜索 fallback、质量评估、自适应迭代、任务持久化、SSE 流。
+
+---
 
 ## API 文档
 
@@ -214,88 +265,30 @@ sudo supervisorctl restart ddreport-backend
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
-## 项目结构
-
-```
-dd-report-generator/
-├── backend/
-│   ├── main.py              # FastAPI 应用入口
-│   ├── config.py            # 全局配置
-│   ├── db.py                # SQLite 数据库
-│   ├── routers/
-│   │   ├── upload.py        # 上传和模板下载
-│   │   ├── generate.py      # 报告生成
-│   │   └── reports.py       # 报告管理
-│   ├── parsers/             # 文档解析器
-│   ├── agents/              # AI Agent
-│   └── tools/               # 搜索和抓取工具
-├── frontend/
-│   ├── src/
-│   │   ├── components/      # React 组件
-│   │   ├── api/             # API 客户端
-│   │   └── hooks/           # 自定义 Hooks
-│   └── dist/                # 构建输出
-├── uploads/                 # 上传文件存储
-├── outputs/                 # 生成报告存储
-├── settings.json            # 配置文件（需手动创建）
-├── DEPLOYMENT.md            # 详细部署指南
-└── deploy.sh                # 自动部署脚本
-```
+---
 
 ## 常见问题
 
-### Q: 如何获取 API keys？
+**Q: 报告生成失败？**
+1. 检查 `settings.json` API key 是否正确
+2. 查看后端终端日志（Step 编号 + 错误信息）
+3. 确认 API 余额充足，网络可访问 DashScope
 
-- **阿里云 DashScope**: https://dashscope.console.aliyun.com/
-- **Bocha 搜索**: 联系 Bocha 服务商
-- **百度搜索**: https://ai.baidu.com/
+**Q: 搜索结果为空？**
+- 检查搜索 provider 配置；可临时切换为 `duckduckgo`（需代理）
+- 查看 `fallback_chain` 是否配置了多个 provider
 
-### Q: 报告生成失败怎么办？
+**Q: FastGPT 推送失败？**
+- 检查 `fastgpt_config.enabled` 是否为 `true`
+- 确认 FastGPT 服务地址和 API key 可用
+- BUG-003：公司名修改后重推可能产生重复 collection，暂需手动在 FastGPT 清理旧条目
 
-1. 检查 API key 是否正确配置
-2. 查看后端日志：`tail -f /var/log/ddreport-backend.log`
-3. 确认网络连接正常
-4. 检查 API 余额是否充足
+**Q: uploads/ 目录越来越大？**
+- BUG-004：session 无自动清理，可手动删除 `uploads/` 下过期目录
+- 临时方案：定期运行 `find uploads/ -mtime +7 -type d | xargs rm -rf`
 
-### Q: 如何更新部署的代码？
-
-```bash
-cd /home/ddreport/dd-report-generator
-git pull origin main
-source venv/bin/activate
-pip install -r backend/requirements.txt
-cd frontend && npm install && npm run build
-sudo supervisorctl restart ddreport-backend
-```
-
-### Q: 支持哪些文件格式？
-
-- **Excel**: .xlsx, .xls
-- **附件**: .pdf, .docx, .pptx, .md, .txt
-
-## 性能优化
-
-- 使用 Nginx 反向代理和静态文件缓存
-- 多 worker 进程提升并发能力
-- 搜索工具 fallback 机制提高成功率
-- OCR 自适应 DPI 平衡速度和质量
-
-## 安全建议
-
-- 不要将 `settings.json` 提交到 Git
-- 使用 HTTPS 加密传输
-- 定期更新依赖包
-- 配置防火墙限制访问
-- 定期备份数据
+---
 
 ## 许可证
 
 MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 联系方式
-
-如有问题，请提交 GitHub Issue。

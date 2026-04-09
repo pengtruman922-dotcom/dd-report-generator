@@ -228,13 +228,15 @@ async def upload_excel(file: UploadFile = File(...)):
         companies = get_company_list(str(file_path))
         all_rows = parse_excel(str(file_path))
 
-        # Auto-generate bd_code for rows with empty bd_code
-        for company in companies:
-            if not company.get("bd_code") or not company["bd_code"].strip():
-                company["bd_code"] = get_next_bd_code()
+        # Auto-generate bd_code for rows with empty bd_code.
+        # Generate once per all_rows entry and sync to companies to ensure consistency (BUG-001 fix).
         for row in all_rows:
             if not row.get("bd_code") or not str(row["bd_code"]).strip():
                 row["bd_code"] = get_next_bd_code()
+        # Sync bd_codes from all_rows back to companies (matched by index)
+        for i, company in enumerate(companies):
+            if i < len(all_rows):
+                company["bd_code"] = str(all_rows[i].get("bd_code", company.get("bd_code", "")))
 
     except Exception as e:
         raise HTTPException(422, f"Failed to parse Excel: {e}")

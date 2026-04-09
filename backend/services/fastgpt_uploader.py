@@ -77,7 +77,7 @@ async def delete_collection(collection_id: str, fastgpt_config: dict[str, str]) 
         "Content-Type": "application/json",
     }
     try:
-        async with httpx.AsyncClient(verify=True, timeout=30) as client:
+        async with httpx.AsyncClient(verify=False, timeout=30) as client:
             res = await client.delete(
                 f"{api_url}/collection/delete",
                 headers=headers,
@@ -120,7 +120,7 @@ async def push_chunks_to_fastgpt(
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(verify=True, timeout=60) as client:
+    async with httpx.AsyncClient(verify=False, timeout=60) as client:
         # 1. Create collection with tags
         create_payload = {
             "datasetId": dataset_id,

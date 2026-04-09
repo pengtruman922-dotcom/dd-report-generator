@@ -9,8 +9,9 @@ import {
   pushToFastGPT,
   confirmReport,
   updateReportMeta,
+  listIntakeTasks,
 } from "../api/client";
-import type { ReportMeta, PushStatus } from "../types";
+import type { ReportMeta, PushStatus, IntakeTaskStatus } from "../types";
 import { useAuth } from "../contexts/AuthContext";
 import BatchPushModal from "./BatchPushModal";
 import EditReportModal from "./EditReportModal";
@@ -142,6 +143,25 @@ const ALL_COLUMNS: ColumnDef[] = [
     label: "报告生成状态",
     defaultVisible: true,
     render: (val, row) => {
+      // Check if there's a live intake task for this report
+      const liveTask = window.__intakeTasks?.[row.report_id]
+        ?? (row.bd_code ? window.__intakeTasks?.[row.bd_code] : undefined);
+      if (liveTask && liveTask.status !== "completed" && liveTask.status !== "cancelled" && liveTask.status !== "failed") {
+        const stepLabel = liveTask.step > 0 ? ` Step${liveTask.step}/${liveTask.total_steps}` : "";
+        if (liveTask.status === "cancelling") {
+          return <span className="inline-block px-2 py-0.5 rounded text-xs bg-orange-100 text-orange-600 animate-pulse">终止中</span>;
+        }
+        if (liveTask.status === "queued") {
+          const pos = liveTask.queue_position ?? "";
+          return <span className="inline-block px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">排队中{pos ? ` 第${pos}位` : ""}</span>;
+        }
+        const isUpdate = liveTask.op_type === "light_update" || liveTask.op_type === "full_regenerate";
+        return (
+          <span className="inline-block px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700 animate-pulse">
+            {isUpdate ? "更新中" : "生成中"}⟳{stepLabel}
+          </span>
+        );
+      }
       if (val === "completed")
         return <span className="inline-block px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">已完成</span>;
       if (val === "updated")
@@ -273,6 +293,7 @@ declare global {
     __confirmReport?: (id: string) => void;
     __refreshReports?: () => void;
     __updateManualRating?: (id: string, rating: string | null) => void;
+    __intakeTasks?: Record<string, IntakeTaskStatus>;
   }
 }
 
@@ -306,6 +327,34 @@ export default function ReportsPage() {
     } catch (e: any) {
       alert("更新人工评级失败: " + e.message);
     }
+  }, []);
+
+  // Intake task status — poll while any tasks are running, expose via window global
+  const [intakeTasks, setIntakeTasks] = useState<Record<string, IntakeTaskStatus>>({});
+
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const { tasks } = await listIntakeTasks();
+        if (!active) return;
+        // Index by report_id and bd_code for O(1) lookup in render
+        const byKey: Record<string, IntakeTaskStatus> = {};
+        for (const t of tasks) {
+          if (t.report_id) byKey[t.report_id] = t;
+          if (t.bd_code) byKey[t.bd_code] = t;
+        }
+        setIntakeTasks(byKey);
+        window.__intakeTasks = byKey;
+      } catch {}
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      delete window.__intakeTasks;
+    };
   }, []);
 
   // fetchReports ref for global access
@@ -641,6 +690,19 @@ export default function ReportsPage() {
       return finalRating ? `${stars(row.score)} ${finalRating}` : "";
     }
     if (col.key === "manual_rating") return val || "";
+    if (col.key === "token_usage_json") {
+      if (!val) return "";
+      try {
+        const usage = JSON.parse(String(val));
+        const total = Object.values(usage).reduce((sum: number, count: any) => sum + (typeof count === 'number' ? count : 0), 0);
+        return String(total);
+      } catch {
+        return "";
+      }
+    }
+    if (col.key === "estimated_cost") {
+      return typeof val === "number" ? `¥${val.toFixed(2)}` : "";
+    }
     return String(val);
   };
 

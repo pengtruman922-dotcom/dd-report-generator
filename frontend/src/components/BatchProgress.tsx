@@ -1,5 +1,4 @@
-import { useState, useEffect } from "react";
-import { useSSE } from "../hooks/useSSE";
+import { useState, useEffect, useRef } from "react";
 import type { Company } from "../types";
 
 interface Props {
@@ -31,36 +30,50 @@ export default function BatchProgress({ taskIds, companies, onAllComplete }: Pro
     }))
   );
 
-  // Track SSE connections for each task
-  const [sseStates, setSseStates] = useState<Record<string, any>>({});
+  const eventSourcesRef = useRef<Map<string, EventSource>>(new Map());
 
   useEffect(() => {
-    // Subscribe to SSE for each task
-    const newStates: Record<string, any> = {};
+    // Create SSE connection for each task
     taskIds.forEach((taskId) => {
-      const sse = useSSE(taskId);
-      newStates[taskId] = sse;
-    });
-    setSseStates(newStates);
-  }, [taskIds]);
+      if (eventSourcesRef.current.has(taskId)) return;
 
-  // Update task progress from SSE states
-  useEffect(() => {
-    setTasks((prev) =>
-      prev.map((task) => {
-        const sse = sseStates[task.taskId];
-        if (!sse) return task;
-        return {
-          ...task,
-          progress: sse.progress?.step || 0,
-          message: sse.progress?.message || task.message,
-          done: sse.done,
-          error: sse.error,
-          reportId: sse.reportId,
-        };
-      })
-    );
-  }, [sseStates]);
+      const es = new EventSource(`/api/tasks/${taskId}/stream`);
+      eventSourcesRef.current.set(taskId, es);
+
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setTasks((prev) =>
+            prev.map((task) =>
+              task.taskId === taskId
+                ? {
+                    ...task,
+                    progress: data.progress?.step || task.progress,
+                    message: data.progress?.message || task.message,
+                    done: data.done || task.done,
+                    error: data.error || task.error,
+                    reportId: data.report_id || task.reportId,
+                  }
+                : task
+            )
+          );
+        } catch (e) {
+          console.error("Failed to parse SSE data:", e);
+        }
+      };
+
+      es.onerror = () => {
+        es.close();
+        eventSourcesRef.current.delete(taskId);
+      };
+    });
+
+    // Cleanup on unmount
+    return () => {
+      eventSourcesRef.current.forEach((es) => es.close());
+      eventSourcesRef.current.clear();
+    };
+  }, [taskIds]);
 
   // Check if all tasks are complete
   useEffect(() => {

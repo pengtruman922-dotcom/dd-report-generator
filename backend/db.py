@@ -67,7 +67,13 @@ def get_db() -> sqlite3.Connection:
     """Return a connection with Row factory."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as e:
+        # Some Windows environments cannot create the companion WAL files
+        # reliably, so fall back to the default journal mode instead of
+        # crashing the whole backend during startup.
+        log.warning("Failed to enable SQLite WAL mode for %s: %s", DB_PATH, e)
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -130,6 +136,7 @@ def init_db():
             score REAL,
             rating TEXT,
             manual_rating TEXT,
+            manual_rating_note TEXT,
             status TEXT NOT NULL DEFAULT 'completed',
             owner TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
@@ -166,6 +173,22 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_versions_report_id ON report_versions(report_id);
         CREATE INDEX IF NOT EXISTS idx_versions_created_at ON report_versions(created_at DESC);
+        CREATE TABLE IF NOT EXISTS intake_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id TEXT NOT NULL,
+            log_type TEXT NOT NULL,
+            trigger_reason TEXT,
+            input_sources TEXT,
+            changed_fields TEXT,
+            steps_executed TEXT,
+            steps_skipped TEXT,
+            research_data_age_days INTEGER,
+            operator TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (report_id) REFERENCES reports(report_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_intake_logs_report_id ON intake_logs(report_id);
+        CREATE INDEX IF NOT EXISTS idx_intake_logs_created_at ON intake_logs(created_at DESC);
     """)
     # Seed admin if not exists
     row = conn.execute("SELECT id FROM users WHERE username = ?", ("admin",)).fetchone()
@@ -189,6 +212,34 @@ def init_db():
         if "estimated_cost" not in columns:
             cursor.execute("ALTER TABLE reports ADD COLUMN estimated_cost REAL")
             log.info("Added estimated_cost column to reports table")
+
+        if "manual_rating_note" not in columns:
+            cursor.execute("ALTER TABLE reports ADD COLUMN manual_rating_note TEXT")
+            log.info("Added manual_rating_note column to reports table")
+
+        # Migration: add intake_logs table if not exists (for existing DBs)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS intake_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id TEXT NOT NULL,
+                log_type TEXT NOT NULL,
+                trigger_reason TEXT,
+                input_sources TEXT,
+                changed_fields TEXT,
+                steps_executed TEXT,
+                steps_skipped TEXT,
+                research_data_age_days INTEGER,
+                operator TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY (report_id) REFERENCES reports(report_id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intake_logs_report_id ON intake_logs(report_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intake_logs_created_at ON intake_logs(created_at DESC)"
+        )
 
         conn.commit()
     except Exception as e:

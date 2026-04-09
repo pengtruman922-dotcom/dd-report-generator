@@ -17,6 +17,7 @@ async def write_report(
     ai_config: dict,
     attachment_items: list[tuple[str, str]] | None = None,
     on_stream_chunk: Callable[[str], Any] | None = None,
+    research_quality: str = "normal",  # "normal" | "insufficient"
 ) -> tuple[str, dict]:
     """Generate the full Markdown DD report. Returns (report text, usage_dict).
 
@@ -40,6 +41,20 @@ async def write_report(
         + json.dumps(research_data, ensure_ascii=False, indent=2)
         + "\n```\n",
     ]
+
+    # Inject data quality warning when research found nothing
+    if research_quality == "insufficient":
+        parts.append(
+            "## ⚠️ 数据质量警告\n"
+            "本次联网调研未能获取到该公司的有效公开信息（搜索结果为空或无法确认公司身份）。\n"
+            "**撰写报告时必须严格遵守以下规则**：\n"
+            "1. **禁止推断或编造任何未经信息来源支撑的数据**，包括财务数据、行业地位、竞争格局等\n"
+            "2. **所有无来源的字段必须明确标注「信息缺失，待核实」**，不得用「未披露」「暂未获取」等模糊说法填充实质内容\n"
+            "3. **报告的核心价值在于：准确识别信息缺口 + 给出具体的补充信息行动建议**\n"
+            "4. 行业分析部分如无法确认公司所属行业，**不得撰写行业分析章节**\n"
+            "5. 估值分析章节**必须省略**，因为无财务数据支撑\n"
+            "6. 报告开头必须用醒目方式标注：「本报告因公开信息极度有限，主要内容为信息缺口梳理和尽调行动建议，不含实质性财务及经营分析」\n\n"
+        )
 
     # Append raw attachment texts so the writer has full context
     if attachment_items:

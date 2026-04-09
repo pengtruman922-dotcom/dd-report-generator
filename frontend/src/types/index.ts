@@ -183,3 +183,74 @@ export interface ToolsConfig {
   scraper: ToolTypeConfig;
   datasource: ToolTypeConfig;
 }
+
+// ── Intake Agent types ────────────────────────────────────────
+
+export interface IntakeChangedField {
+  old: string | null;
+  new: string;
+}
+
+export interface IntakeOperation {
+  type: "create" | "update";
+  company_name: string;
+  bd_code?: string;
+  fields?: Record<string, string>;            // for create
+  changed_fields?: Record<string, IntakeChangedField>;  // for update
+  source: string[];
+}
+
+export interface IntakeParseResult {
+  operations: IntakeOperation[];
+  summary: string;
+  mode: string;
+  input_sources: string[];
+  raw_content_summary?: string;
+}
+
+export interface IntakeExecuteResult {
+  task_id: string;
+  report_id?: string;
+  bd_code?: string;
+  type: "create" | "light_update" | "full_regenerate";
+  needs_research_prompt?: boolean;
+  research_age_days?: number | null;
+  research_expired?: boolean;
+}
+
+// In-memory intake task status from backend
+export interface IntakeTaskStatus {
+  task_id: string;
+  report_id?: string;
+  bd_code?: string;
+  company_name: string;
+  op_type: "create" | "light_update" | "full_regenerate";
+  status: "queued" | "running" | "completed" | "cancelling" | "cancelled" | "failed";
+  step: number;
+  total_steps: number;
+  queue_position?: number;
+}
+
+export interface IntakeLog {
+  id: number;
+  report_id: string;
+  log_type: "create" | "light_update" | "full_regenerate";
+  trigger_reason: string | null;
+  input_sources: string[];
+  changed_fields: Record<string, IntakeChangedField>;
+  steps_executed: string[];
+  steps_skipped: Array<{ step: string; reason: string }>;
+  research_data_age_days: number | null;
+  operator: string | null;
+  created_at: string;
+}
+
+export interface IntakeAgentConfig {
+  base_url: string;
+  api_key: string;
+  model: string;
+  max_crawl_depth: number;
+  default_mode: "auto" | "manual";
+  core_fields_trigger_research: string[];
+  research_data_expire_days: number;
+}

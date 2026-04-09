@@ -7,6 +7,7 @@ import PipelineProgress from "./PipelineProgress";
 import BatchProgress from "./BatchProgress";
 import ReportViewer from "./ReportViewer";
 import ReportActions from "./ReportActions";
+import IntakeAgent from "./IntakeAgent";
 import {
   uploadExcel,
   uploadAttachments,
@@ -19,7 +20,7 @@ import {
 import { useSSE } from "../hooks/useSSE";
 import type { Company, FieldDef, ReportMeta } from "../types";
 
-type InputMode = "excel" | "manual";
+type InputMode = "excel" | "manual" | "intake";
 type GenerateMode = "single" | "batch";
 
 // Manual input form field ordering (required first)
@@ -272,6 +273,16 @@ export default function HomePage() {
         <h2 className="font-bold text-lg mb-3">1. 输入标的信息</h2>
         <div className="flex gap-2 mb-4">
           <button
+            onClick={() => switchMode("intake")}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+              inputMode === "intake"
+                ? "bg-blue-600 text-white"
+                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+            }`}
+          >
+            智能录入
+          </button>
+          <button
             onClick={() => switchMode("excel")}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
               inputMode === "excel"
@@ -292,6 +303,8 @@ export default function HomePage() {
             手动输入
           </button>
         </div>
+
+        {inputMode === "intake" && <IntakeAgent />}
 
         {inputMode === "excel" && (
           <>
