@@ -8,6 +8,7 @@ data/
 
 # Build artifacts
 frontend/dist/
+frontend/tsconfig.tsbuildinfo
 frontend/node_modules/
 __pycache__/
 *.pyc
@@ -41,3 +42,9 @@ logs/
 
 # OS
 .DS_Store
+
+# Local scratch / manual test files
+mock*.MD
+mock*.md
+backend/test_intake_full.py
+backend/test_intake_remaining.py

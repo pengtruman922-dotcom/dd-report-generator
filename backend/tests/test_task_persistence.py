@@ -1,4 +1,4 @@
-"""Tests for task persistence and recovery functionality."""
+"""Tests for v3 task persistence and recovery functionality."""
 
 import pytest
 import asyncio
@@ -11,6 +11,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.task_manager import TaskManager, TaskStatus
 
 
+async def _create_v3_task(
+    manager: TaskManager,
+    task_id: str,
+    report_id: str,
+    *,
+    owner: str | None = None,
+    company_name: str = "Test Company",
+    bd_code: str = "BD00001",
+    task_kind: str = "v3_create",
+    total_steps: int = 4,
+) -> None:
+    await manager.create_v3_task(
+        task_id=task_id,
+        report_id=report_id,
+        owner=owner,
+        company_name=company_name,
+        bd_code=bd_code,
+        task_kind=task_kind,
+        total_steps=total_steps,
+        message="任务已创建，等待执行",
+    )
+
+
 @pytest.fixture
 def temp_db():
     """Create a temporary database for testing."""
@@ -19,9 +42,12 @@ def temp_db():
 
     with patch('services.task_manager.get_db') as mock_get_db:
         import sqlite3
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        mock_get_db.return_value = conn
+        def _open_conn():
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        mock_get_db.side_effect = _open_conn
 
         yield path, mock_get_db
 
@@ -34,22 +60,13 @@ def temp_db():
 
 @pytest.mark.asyncio
 async def test_task_creation(temp_db):
-    """Test creating a new task record."""
+    """Test creating a new v3 task record."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     task_id = "test-task-1"
     report_id = "report-1"
-    excel_row = {"company_name": "Test Company", "industry": "Tech"}
-    attachment_items = [("file1.pdf", "content1"), ("file2.pdf", "content2")]
-
-    await manager.create_task(
-        task_id=task_id,
-        report_id=report_id,
-        excel_row=excel_row,
-        attachment_items=attachment_items,
-        owner="user1"
-    )
+    await _create_v3_task(manager, task_id, report_id, owner="user1")
 
     # Verify task was created
     task = await manager.get_task(task_id)
@@ -58,25 +75,18 @@ async def test_task_creation(temp_db):
     assert task["report_id"] == report_id
     assert task["status"] == TaskStatus.PENDING
     assert task["owner"] == "user1"
-
-    # Verify JSON fields
-    stored_row = json.loads(task["excel_row"])
-    assert stored_row["company_name"] == "Test Company"
+    assert task["runner_type"] == "v3"
+    assert task["company_name"] == "Test Company"
 
 
 @pytest.mark.asyncio
 async def test_task_status_update(temp_db):
-    """Test updating task status and progress."""
+    """Test updating v3 task status and progress."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     task_id = "test-task-2"
-    await manager.create_task(
-        task_id=task_id,
-        report_id="report-2",
-        excel_row={"company_name": "Test"},
-        attachment_items=[]
-    )
+    await _create_v3_task(manager, task_id, "report-2")
 
     # Update to running
     await manager.update_task_status(task_id, TaskStatus.RUNNING, current_step=1)
@@ -94,17 +104,12 @@ async def test_task_status_update(temp_db):
 
 @pytest.mark.asyncio
 async def test_task_failure_with_error(temp_db):
-    """Test recording task failure with error message."""
+    """Test recording v3 task failure with error message."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     task_id = "test-task-3"
-    await manager.create_task(
-        task_id=task_id,
-        report_id="report-3",
-        excel_row={"company_name": "Test"},
-        attachment_items=[]
-    )
+    await _create_v3_task(manager, task_id, "report-3")
 
     error_msg = "Network connection failed"
     await manager.update_task_status(
@@ -121,14 +126,14 @@ async def test_task_failure_with_error(temp_db):
 
 @pytest.mark.asyncio
 async def test_list_tasks_with_filters(temp_db):
-    """Test listing tasks with status and owner filters."""
+    """Test listing v3 tasks with status and owner filters."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     # Create multiple tasks
-    await manager.create_task("task-1", "report-1", {"name": "A"}, [], owner="user1")
-    await manager.create_task("task-2", "report-2", {"name": "B"}, [], owner="user2")
-    await manager.create_task("task-3", "report-3", {"name": "C"}, [], owner="user1")
+    await _create_v3_task(manager, "task-1", "report-1", owner="user1", company_name="A", bd_code="BD00001")
+    await _create_v3_task(manager, "task-2", "report-2", owner="user2", company_name="B", bd_code="BD00002")
+    await _create_v3_task(manager, "task-3", "report-3", owner="user1", company_name="C", bd_code="BD00003")
 
     await manager.update_task_status("task-1", TaskStatus.RUNNING)
     await manager.update_task_status("task-2", TaskStatus.COMPLETED)
@@ -150,15 +155,15 @@ async def test_list_tasks_with_filters(temp_db):
 
 @pytest.mark.asyncio
 async def test_get_pending_tasks(temp_db):
-    """Test retrieving pending and running tasks for recovery."""
+    """Test retrieving pending and running v3 tasks for recovery."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     # Create tasks with different statuses
-    await manager.create_task("task-pending", "r1", {"name": "A"}, [])
-    await manager.create_task("task-running", "r2", {"name": "B"}, [])
-    await manager.create_task("task-completed", "r3", {"name": "C"}, [])
-    await manager.create_task("task-failed", "r4", {"name": "D"}, [])
+    await _create_v3_task(manager, "task-pending", "r1", company_name="A", bd_code="BD00001")
+    await _create_v3_task(manager, "task-running", "r2", company_name="B", bd_code="BD00002")
+    await _create_v3_task(manager, "task-completed", "r3", company_name="C", bd_code="BD00003")
+    await _create_v3_task(manager, "task-failed", "r4", company_name="D", bd_code="BD00004")
 
     await manager.update_task_status("task-running", TaskStatus.RUNNING)
     await manager.update_task_status("task-completed", TaskStatus.COMPLETED)
@@ -174,12 +179,12 @@ async def test_get_pending_tasks(temp_db):
 
 @pytest.mark.asyncio
 async def test_start_task_success(temp_db):
-    """Test starting a task that completes successfully."""
+    """Test starting a v3 task that completes successfully."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     task_id = "test-task-start"
-    await manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(manager, task_id, "report-1")
 
     # Create a simple task coroutine
     completed = asyncio.Event()
@@ -201,12 +206,12 @@ async def test_start_task_success(temp_db):
 
 @pytest.mark.asyncio
 async def test_start_task_failure(temp_db):
-    """Test starting a task that fails with exception."""
+    """Test starting a v3 task that fails with exception."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     task_id = "test-task-fail"
-    await manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(manager, task_id, "report-1")
 
     async def failing_task():
         await asyncio.sleep(0.01)
@@ -222,12 +227,12 @@ async def test_start_task_failure(temp_db):
 
 @pytest.mark.asyncio
 async def test_cancel_running_task(temp_db):
-    """Test cancelling a running task."""
+    """Test cancelling a running v3 task."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     task_id = "test-task-cancel"
-    await manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(manager, task_id, "report-1")
 
     # Start a long-running task
     async def long_task():
@@ -258,7 +263,7 @@ async def test_cancel_nonexistent_task(temp_db):
 
 @pytest.mark.asyncio
 async def test_task_recovery(temp_db):
-    """Test recovering pending tasks after restart."""
+    """Test recovering persisted generic v3 tasks after restart."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
@@ -298,25 +303,27 @@ async def test_task_recovery(temp_db):
 
 @pytest.mark.asyncio
 async def test_cleanup_old_tasks(temp_db):
-    """Test cleaning up old completed tasks."""
+    """Test cleaning up old completed v3 tasks."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     # Create and complete tasks
-    await manager.create_task("task-old", "report-1", {"name": "Old"}, [])
-    await manager.create_task("task-recent", "report-2", {"name": "Recent"}, [])
+    await _create_v3_task(manager, "task-old", "report-1", company_name="Old", bd_code="BD00001")
+    await _create_v3_task(manager, "task-recent", "report-2", company_name="Recent", bd_code="BD00002")
 
     await manager.update_task_status("task-old", TaskStatus.COMPLETED)
     await manager.update_task_status("task-recent", TaskStatus.COMPLETED)
 
     # Manually set old task's completed_at to 31 days ago
-    conn = mock_get_db.return_value
+    import sqlite3
+    conn = sqlite3.connect(temp_db[0])
     old_date = (datetime.now() - timedelta(days=31)).isoformat()
     conn.execute(
         "UPDATE pipeline_tasks SET completed_at = ? WHERE task_id = ?",
         (old_date, "task-old")
     )
     conn.commit()
+    conn.close()
 
     # Cleanup tasks older than 30 days
     deleted = await manager.cleanup_old_tasks(days=30)
@@ -333,14 +340,14 @@ async def test_cleanup_old_tasks(temp_db):
 
 @pytest.mark.asyncio
 async def test_concurrent_task_execution(temp_db):
-    """Test multiple tasks running concurrently."""
+    """Test multiple v3 tasks running concurrently."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 
     # Create multiple tasks
     task_ids = [f"concurrent-{i}" for i in range(5)]
     for tid in task_ids:
-        await manager.create_task(tid, f"report-{tid}", {"name": tid}, [])
+        await _create_v3_task(manager, tid, f"report-{tid}", company_name=tid, bd_code=f"BD{len(tid):05d}")
 
     # Track completion
     completed = []
@@ -367,7 +374,7 @@ async def test_concurrent_task_execution(temp_db):
 
 @pytest.mark.asyncio
 async def test_task_state_consistency(temp_db):
-    """Test that task state remains consistent across operations."""
+    """Test that generic v3 task state remains consistent across operations."""
     _, mock_get_db = temp_db
     manager = TaskManager()
 

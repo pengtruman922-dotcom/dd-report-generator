@@ -152,7 +152,14 @@ def init_db():
             debug_dir TEXT,
             attachments_dir TEXT,
             token_usage_json TEXT,
-            estimated_cost REAL
+            estimated_cost REAL,
+            report_format TEXT DEFAULT 'v3',
+            feasibility_rating TEXT,
+            feasibility_rating_detail TEXT,
+            feasibility_rating_at TEXT,
+            pending_rating_change TEXT,
+            offer_yuan TEXT,
+            offer_date TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_reports_bd_code ON reports(bd_code);
         CREATE INDEX IF NOT EXISTS idx_reports_company_name ON reports(company_name);
@@ -160,19 +167,20 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
         CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_reports_rating ON reports(rating);
-        CREATE TABLE IF NOT EXISTS report_versions (
-            version_id TEXT PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS report_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id TEXT NOT NULL,
-            version_number INTEGER NOT NULL,
+            chunk_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            summary TEXT,
             content TEXT NOT NULL,
-            metadata_json TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-            created_by TEXT,
-            reason TEXT,
-            FOREIGN KEY (report_id) REFERENCES reports(report_id) ON DELETE CASCADE
+            index_tags TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            FOREIGN KEY (report_id) REFERENCES reports(report_id) ON DELETE CASCADE,
+            UNIQUE(report_id, chunk_id)
         );
-        CREATE INDEX IF NOT EXISTS idx_versions_report_id ON report_versions(report_id);
-        CREATE INDEX IF NOT EXISTS idx_versions_created_at ON report_versions(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chunks_report_id ON report_chunks(report_id);
+        CREATE INDEX IF NOT EXISTS idx_chunks_chunk_id ON report_chunks(chunk_id);
         CREATE TABLE IF NOT EXISTS intake_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id TEXT NOT NULL,

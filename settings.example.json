@@ -1,38 +1,47 @@
 {
   "ai_config": {
-    "extractor": {
-      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "api_key": "填入你的阿里云DashScope API Key",
-      "model": "qwen3-max"
-    },
     "researcher": {
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key": "填入你的阿里云DashScope API Key",
       "model": "qwen3-max"
     },
-    "writer": {
+    "intake_agent": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3.5-plus",
+      "max_crawl_depth": 3,
+      "default_mode": "auto",
+      "core_fields_trigger_research": ["description", "company_intro"],
+      "research_data_expire_days": 90
+    },
+    "matcher_agent": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "填入你的阿里云DashScope API Key",
+      "model": "qwen3.5-plus"
+    },
+    "writer_agent": {
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key": "填入你的阿里云DashScope API Key",
       "model": "qwen3-max"
     },
-    "field_extractor": {
+    "rating_agent": {
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key": "填入你的阿里云DashScope API Key",
       "model": "qwen3-max"
     },
-    "chunker": {
+    "attachment_update_planner": {
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "api_key": "填入你的阿里云DashScope API Key",
-      "model": "qwen3-max"
+      "model": "qwen3.5-plus"
     }
   },
-  "fastgpt_config": {
+  "fastgpt": {
     "enabled": false,
     "api_url": "",
     "api_key": "",
     "dataset_id": ""
   },
-  "tools_config": {
+  "tools": {
     "search": {
       "active_provider": "bocha",
       "fallback_chain": ["bocha", "baidu", "bing_china", "duckduckgo"],

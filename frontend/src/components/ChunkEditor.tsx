@@ -1,70 +1,76 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   getChunks,
   saveChunks,
-  regenerateChunks,
   pushToFastGPT,
 } from "../api/client";
 import type { ReportChunk } from "../types";
 
 interface Props {
   reportId: string;
+  initialChunkId?: string;
 }
 
-export default function ChunkEditor({ reportId }: Props) {
+export default function ChunkEditor({ reportId, initialChunkId }: Props) {
   const [chunks, setChunks] = useState<ReportChunk[]>([]);
   const [selected, setSelected] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [regenerating, setRegenerating] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [message, setMessage] = useState("");
   const [newTag, setNewTag] = useState("");
   const [empty, setEmpty] = useState(false);
 
   useEffect(() => {
+    loadChunks();
+  }, [reportId, initialChunkId]);
+
+  const loadChunks = async () => {
     setLoading(true);
-    getChunks(reportId)
-      .then((data) => {
-        if (data.length === 0) {
-          setEmpty(true);
-        } else {
-          setChunks(data);
-          setEmpty(false);
-        }
-        setLoading(false);
-      })
-      .catch(() => {
+    setMessage("");
+    try {
+      const data = await getChunks(reportId);
+      if (data.length === 0) {
+        setChunks([]);
         setEmpty(true);
-        setLoading(false);
-      });
-  }, [reportId]);
+      } else {
+        setChunks(data);
+        setEmpty(false);
+        if (initialChunkId) {
+          const normalizedChunkId = initialChunkId === "chunk7" ? "tracking" : initialChunkId;
+          const targetIndex = data.findIndex((chunk) => chunk.chunk_id === normalizedChunkId);
+          setSelected(targetIndex >= 0 ? targetIndex : 0);
+        } else {
+          setSelected(0);
+        }
+      }
+    } catch {
+      setChunks([]);
+      setEmpty(true);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    if (!initialChunkId || chunks.length === 0) return;
+    const normalizedChunkId = initialChunkId === "chunk7" ? "tracking" : initialChunkId;
+    const targetIndex = chunks.findIndex((chunk) => chunk.chunk_id === normalizedChunkId);
+    if (targetIndex >= 0 && targetIndex !== selected) {
+      setSelected(targetIndex);
+    }
+  }, [chunks, initialChunkId, selected]);
 
   const handleSave = async () => {
     setSaving(true);
     setMessage("");
     try {
       await saveChunks(reportId, chunks);
+      await loadChunks();
       setMessage("保存成功");
     } catch (e: any) {
       setMessage("保存失败: " + e.message);
     }
     setSaving(false);
-  };
-
-  const handleRegenerate = async () => {
-    setRegenerating(true);
-    setMessage("");
-    try {
-      const data = await regenerateChunks(reportId);
-      setChunks(data);
-      setEmpty(false);
-      setSelected(0);
-      setMessage("重新生成完成");
-    } catch (e: any) {
-      setMessage("重新生成失败: " + e.message);
-    }
-    setRegenerating(false);
   };
 
   const handlePush = async () => {
@@ -102,9 +108,17 @@ export default function ChunkEditor({ reportId }: Props) {
     setNewTag("");
   };
 
-  const updateQ = (chunkIdx: number, value: string) => {
+  const updateContent = (chunkIdx: number, value: string) => {
     setChunks((prev) =>
-      prev.map((c, i) => (i === chunkIdx ? { ...c, q: value } : c)),
+      prev.map((c, i) =>
+        i === chunkIdx
+          ? {
+              ...c,
+              q: value,
+              content: value,
+            }
+          : c,
+      ),
     );
   };
 
@@ -119,14 +133,8 @@ export default function ChunkEditor({ reportId }: Props) {
   if (empty) {
     return (
       <div className="text-center py-10">
-        <p className="text-gray-400 mb-4">暂无分块数据</p>
-        <button
-          onClick={handleRegenerate}
-          disabled={regenerating}
-          className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:opacity-50"
-        >
-          {regenerating ? "生成中..." : "生成分块与索引"}
-        </button>
+        <p className="text-gray-400 mb-1">暂无分块数据</p>
+        <p className="text-xs text-gray-500">请先完成智能录入或写作流程。</p>
         {message && (
           <p
             className={`mt-3 text-sm ${message.includes("失败") ? "text-red-600" : "text-green-600"}`}
@@ -139,10 +147,29 @@ export default function ChunkEditor({ reportId }: Props) {
   }
 
   const current = chunks[selected];
+  const currentContent = current?.content || current?.q || "";
+  const currentKind =
+    current?.chunk_id === "tracking" ? "tracking"
+      : current?.chunk_id === "info" ? "info"
+      : "legacy";
+  const kindLabel =
+    currentKind === "tracking" ? "跟进动态块"
+      : currentKind === "info" ? "标的信息块"
+      : "历史内容块";
+  const kindHint =
+    currentKind === "tracking"
+      ? "内部时间线，保留动态变化与历史值，不推送到 FastGPT。"
+      : currentKind === "info"
+        ? "对外检索主内容，只保留当前有效事实。"
+        : "兼容旧结构的历史块内容。";
 
   return (
     <div className="space-y-4">
-      {/* Action bar */}
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-center gap-2">
+        <span className="text-blue-700 font-medium text-sm">📦 当前内容</span>
+        <span className="text-blue-600 text-xs">当前内容来自 `report_chunks`，可直接编辑并保存。</span>
+      </div>
+
       <div className="flex items-center gap-3">
         <button
           onClick={handleSave}
@@ -150,13 +177,6 @@ export default function ChunkEditor({ reportId }: Props) {
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:opacity-50"
         >
           {saving ? "保存中..." : "保存修改"}
-        </button>
-        <button
-          onClick={handleRegenerate}
-          disabled={regenerating}
-          className="px-4 py-2 bg-amber-500 text-white text-sm rounded hover:bg-amber-600 disabled:opacity-50"
-        >
-          {regenerating ? "生成中..." : "重新生成索引"}
         </button>
         <button
           onClick={handlePush}
@@ -175,11 +195,10 @@ export default function ChunkEditor({ reportId }: Props) {
       </div>
 
       <div className="flex gap-4">
-        {/* Left sidebar: chunk tabs */}
         <div className="w-56 flex-shrink-0 space-y-1">
           {chunks.map((chunk, i) => (
             <button
-              key={i}
+              key={chunk.chunk_id || `${chunk.title}-${i}`}
               onClick={() => setSelected(i)}
               className={`w-full text-left px-3 py-2 rounded text-sm transition ${
                 i === selected
@@ -195,22 +214,35 @@ export default function ChunkEditor({ reportId }: Props) {
           ))}
         </div>
 
-        {/* Main content area */}
         <div className="flex-1 min-w-0 space-y-4">
-          {/* Content editor */}
+          <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+            <div className="text-sm font-medium text-gray-800">{kindLabel}</div>
+            <div className="mt-1 text-xs text-gray-500">{kindHint}</div>
+          </div>
+
+          {current?.summary && (
+            <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">
+                摘要
+              </label>
+              <div className="bg-gray-50 border rounded-lg px-3 py-2 text-sm text-gray-700 whitespace-pre-wrap">
+                {current.summary}
+              </div>
+            </div>
+          )}
+
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-1">
-              内容（q 字段）
+              内容
             </label>
             <textarea
-              value={current?.q || ""}
-              onChange={(e) => updateQ(selected, e.target.value)}
+              value={currentContent}
+              onChange={(e) => updateContent(selected, e.target.value)}
               rows={12}
               className="w-full border rounded-lg px-3 py-2 text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-300 resize-y"
             />
           </div>
 
-          {/* Indexes */}
           <div>
             <label className="block text-sm font-medium text-gray-600 mb-2">
               索引标签（{current?.indexes.length || 0} 个）
@@ -218,7 +250,7 @@ export default function ChunkEditor({ reportId }: Props) {
             <div className="flex flex-wrap gap-2 mb-3">
               {current?.indexes.map((idx, j) => (
                 <span
-                  key={j}
+                  key={`${idx.text}-${j}`}
                   className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-50 text-blue-700 text-sm rounded-full border border-blue-200"
                 >
                   {idx.text}
@@ -245,7 +277,6 @@ export default function ChunkEditor({ reportId }: Props) {
               ))}
             </div>
 
-            {/* Add new tag */}
             <div className="flex gap-2">
               <input
                 type="text"

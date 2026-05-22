@@ -1,7 +1,8 @@
 """Add file path fields to reports table for unified storage model.
 
 This migration adds md_path, chunks_path, debug_dir, and attachments_dir fields
-to the reports table to enable database-managed file paths.
+to the reports table. Note: `chunks_path` is retained only for historical
+schemas; current v3 runtime uses `report_chunks` instead of `*_chunks.json`.
 """
 
 import sqlite3

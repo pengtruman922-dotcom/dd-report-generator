@@ -1,7 +1,7 @@
 # DD Report Generator · 项目路线图
 
 > 本文件是项目管理的主索引。所有功能设计、开发任务、Bug 修复均在此追踪。
-> 最后更新：2026-04-08
+> 最后更新：2026-04-17
 
 ---
 
@@ -11,7 +11,10 @@
 .project/
 ├── ROADMAP.md              ← 你在这里：主索引，进度总览
 └── design/
-    └── v2-smart-intake.md  ← v2.0 功能设计文档（详细需求、交互方案）
+    ├── v2-smart-intake.md        ← v2.0 功能设计文档（详细需求、交互方案）
+    ├── v3-development-plan.md    ← 既有 v3.0 智能录入开发计划
+    ├── only-v3-migration-plan.md ← Only V3 收敛与迁移方案（2026-04-16）
+    └── only-v3-acceptance-checklist.md ← Only V3 手工回归与验收清单
 ```
 
 ---
@@ -23,6 +26,41 @@
 | v1.0 | ✅ 已上线 | 基础流水线：Excel录入 → 6步生成 → FastGPT推送 |
 | v2.0 | 🟡 开发中 | 智能录入 Agent + 轻量更新流程（部分已实现，见下方）|
 | v2.1 | 🟡 开发中 | 并行执行 + 任务终止 + prompt精简（本次迭代）|
+| v3-only | ✅ 主体完成 | Only V3 已切主线，进入回归与验收阶段 |
+
+---
+
+## 当前优先事项（2026-04-17）
+
+### Only V3 收敛
+
+已完成：
+
+- `design/only-v3-migration-plan.md`
+- `design/only-v3-acceptance-checklist.md`
+
+已按既定顺序完成：
+
+1. 隐藏旧入口
+2. 补全 v3 主链闭环
+3. 统一详情页与报告消费层
+4. 删除旧服务与旧路由
+
+当前重点：
+
+1. 手工回归 Only V3 主流程
+2. 验证历史 legacy 报告消费兼容
+3. 收口残余文档描述
+
+### 本轮关注范围
+
+| 方向 | 核心文件 | 结论 |
+|------|---------|------|
+| 首页录入 | `frontend/src/components/HomePage.tsx` | 已收敛为 Only V3 |
+| 智能录入执行 | `backend/routers/intake.py` | 已切到 v3 parse + execute-v3 |
+| v3 编排 | `backend/services/pipeline_v3.py` | 已成为唯一执行主链 |
+| 报告消费层 | `frontend/src/components/ReportDetail.tsx` / `backend/routers/report.py` | 已完成 v3 / legacy 兼容适配 |
+| 旧链下线 | `backend/services/intake_session_store.py` | legacy 路由已删，剩余仅保留 v3 所需 helper |
 
 ---
 
@@ -41,8 +79,8 @@
 
 | 文件 | 变更内容 | 状态 |
 |------|---------|------|
-| `agents/intake_agent.py` | existing_targets 只保留公司名+行业，上限1000条 | ✅ 完成 |
-| `prompts/intake_agent_prompt.py` | 去掉bd_code/description，新增"更新时输出库中一致名称"指令；去掉bd_code输出要求 | ✅ 完成 |
+| `agents/intake_agent_v3.py` / `agents/matcher_agent.py` | v3 解析与匹配替代旧 intake agent | ✅ 完成 |
+| `agents/intake_merger.py` | 解析结果与匹配结果合并为确认层数据 | ✅ 完成 |
 | `routers/intake.py` | parse后根据company_name模糊匹配补填bd_code；更新操作执行前保存旧数据快照 | ✅ 完成 |
 | `routers/intake.py` | 新增 `/cancel/{task_id}` 终止接口；终止时新建删数据，更新回滚快照 | ✅ 完成 |
 | `services/task_manager.py` | 新增滑动窗口队列（最多5并行），任务状态增加 queued/cancelling | ✅ 完成 |
@@ -76,7 +114,7 @@
 ### 模块一：录入 Agent
 | 子功能 | 状态 | 说明 |
 |--------|------|------|
-| 混合输入支持（文字/图片/文档/链接） | ✅ 已完成 | `IntakeAgent.tsx` UI + 后端 `intake_agent.py` |
+| 混合输入支持（文字/图片/文档/链接） | ✅ 已完成 | `IntakeAgent.tsx` UI + 后端 `intake_agent_v3.py` |
 | 多模态图片理解（qwen3.5-plus） | ✅ 已完成 | prompt + 前端联调完成 |
 | 网页智能下钻（最多3次） | ⬜ 待开发 | 设计完成，未实现 |
 | 多标的识别与意图解析 | ✅ 已完成 | 含新建/更新混合识别 |
@@ -86,17 +124,17 @@
 ### 模块二：执行模式
 | 子功能 | 状态 | 说明 |
 |--------|------|------|
-| 自动模式（默认） | ✅ 已完成 | `/execute` 接口 |
-| 手动确认模式（预览卡） | ✅ 已完成 | `IntakeAgent.tsx` 预览卡 |
+| 统一确认后执行 | ✅ 已完成 | `parse-async` + 确认层 + `/execute-v3` |
+| 手动确认模式（预览卡） | ✅ 已完成 | `IntakeAgent.tsx` 确认层 |
 | 并行执行（滑动窗口，最多5个）| ✅ 已完成 | v2.1 |
 | 任务终止（含回滚）| ✅ 已完成 | v2.1 |
 
-### 模块三：轻量更新流程
+### 模块三：v3 更新流程
 | 子功能 | 状态 | 说明 |
 |--------|------|------|
-| Step3' 全文重写（仅变化字段驱动） | ✅ 已实现 | `services/light_update_pipeline.py` |
-| 完整重调研触发提示 | ✅ 已实现 | `ResearchPromptModal` |
-| 调研数据复用时效提示 | ✅ 已实现 | |
+| v3 更新执行 | ✅ 已实现 | `pipeline_v3.py` |
+| 解析确认后更新 | ✅ 已实现 | `IntakeAgent.tsx` |
+| 附件/材料摘要透传 | ✅ 已实现 | `routers/intake.py` → `pipeline_v3.py` |
 
 ### 模块四：更新记录
 | 子功能 | 状态 | 说明 |

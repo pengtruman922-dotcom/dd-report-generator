@@ -7,10 +7,13 @@ import json
 import re
 import shutil
 import uuid
+from decimal import Decimal, InvalidOperation
+from urllib.parse import quote
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -18,40 +21,25 @@ import logging
 
 from auth import get_current_user
 from config import OUTPUT_DIR, load_settings, DEFAULT_FASTGPT_CONFIG
-from parsers.pdf_parser import extract_pdf_text
-from services.chunker import chunk_and_index
+from db import get_db
 from services.fastgpt_uploader import (
-    push_chunks_to_fastgpt,
+    push_report_to_fastgpt,
     delete_collection,
-    save_push_record,
-    compute_chunks_hash,
 )
 
 log = logging.getLogger(__name__)
-from parsers.md_parser import read_md
-from parsers.docx_parser import extract_docx_text
-from parsers.pptx_parser import extract_pptx_text
-from services.pipeline import run_pipeline
 from services.sse_manager import sse_manager
-from services.task_manager import task_manager
-from routers.upload import get_session as get_upload_session
 
 router = APIRouter()
 
 
-class GenerateRequest(BaseModel):
-    session_id: str
-    bd_code: str
-    report_id: str | None = None  # For regeneration: overwrite existing report
-
-
-class BatchGenerateRequest(BaseModel):
-    session_id: str
-    bd_codes: list[str]
-
-
 class BatchDeleteRequest(BaseModel):
     report_ids: list[str]
+
+
+class AttachmentUpdateRequest(BaseModel):
+    attachment_filenames: list[str]
+    note: str | None = None
 
 
 class ChunkIndex(BaseModel):
@@ -62,28 +50,323 @@ class ReportChunk(BaseModel):
     title: str
     q: str
     indexes: list[ChunkIndex] = []
+    chunk_id: str | None = None
+    summary: str | None = None
+    content: str | None = None
 
 
-def _parse_attachment_file(fp: Path) -> str:
-    """Parse text from an attachment file on disk."""
-    ext = fp.suffix.lower()
-    if ext == ".pdf":
-        return extract_pdf_text(fp)
-    if ext in (".md", ".txt"):
-        return read_md(fp)
-    if ext == ".docx":
-        return extract_docx_text(fp)
-    if ext == ".pptx":
-        return extract_pptx_text(fp)
-    return ""
-
-
+_V3_CHUNK_LABELS = {
+    "chunk0": "身份卡",
+    "chunk1": "财务数据",
+    "chunk2": "业务与竞争力",
+    "chunk3": "行业与市场",
+    "chunk4": "风险与合规",
+    "chunk5": "交易条件",
+    "chunk6": "客户与供应链",
+    "chunk7": "跟进动态",
+}
+_V4_CHUNK_LABELS = {
+    "info": "标的信息",
+    "tracking": "跟进动态",
+}
+_ALL_CHUNK_LABELS = {**_V3_CHUNK_LABELS, **_V4_CHUNK_LABELS}
+_CHUNK_RENDER_ORDER = {"info": 0, "tracking": 1}
 # Protected system fields that cannot be edited
 _PROTECTED_META_KEYS = {
     "report_id", "bd_code", "status", "score", "rating",
     "created_at", "file_size", "owner", "push_records",
     "push_status", "push_info", "attachments",
 }
+
+_DATE_RE = re.compile(r"(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})日?")
+_AMOUNT_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>亿元|亿|万元|万|元)")
+
+
+def _build_attachment_update_log_fields(updated_chunks: list[str], attachments_used: list[str]) -> dict:
+    if not updated_chunks:
+        return {
+            "附件更新": {
+                "old": "报告正文未变更",
+                "new": "已检查新附件，但未识别到需要更新的章节",
+            }
+        }
+    attachment_text = "、".join(attachments_used) if attachments_used else "本次上传附件"
+    return {
+        _ALL_CHUNK_LABELS.get(chunk_id, chunk_id): {
+            "old": "保留原有内容",
+            "new": f"依据 {attachment_text} 增量更新",
+        }
+        for chunk_id in updated_chunks
+    }
+
+
+def _render_markdown_from_chunks(
+    company_name: str,
+    report_format: str,
+    chunk_rows: list[dict[str, str]],
+) -> str:
+    title = "标的信息" if report_format == "v4" else "尽调报告"
+    ordered_rows = sorted(
+        chunk_rows,
+        key=lambda cr: _CHUNK_RENDER_ORDER.get(cr["chunk_id"], 99),
+    )
+    parts = [f"# {company_name} {title}\n"]
+    for row in ordered_rows:
+        parts.append(f"\n## {row['label']}\n")
+        if row.get("summary"):
+            parts.append(f"\n**摘要**: {row['summary']}\n")
+        parts.append(f"\n{row.get('content') or ''}\n")
+    return "".join(parts)
+
+
+def _iter_meaningful_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[#>\-\*\+\d\.\)\(、\s]+", "", line).strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _normalize_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = _DATE_RE.search(value)
+    if not match:
+        return None
+    return f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+
+
+def _amount_match_to_yuan(match: re.Match[str]) -> str | None:
+    unit = match.group("unit")
+    try:
+        amount = Decimal(match.group("value"))
+    except (InvalidOperation, TypeError):
+        return None
+    multiplier = {
+        "亿元": Decimal("100000000"),
+        "亿": Decimal("100000000"),
+        "万元": Decimal("10000"),
+        "万": Decimal("10000"),
+        "元": Decimal("1"),
+    }.get(unit)
+    if multiplier is None:
+        return None
+    return str(int(amount * multiplier))
+
+
+def _extract_latest_fact_from_text(
+    text: str,
+    keywords: tuple[str, ...],
+) -> tuple[str | None, str | None]:
+    fallback_date = None
+    for match in _DATE_RE.finditer(text or ""):
+        fallback_date = _normalize_date(match.group(0))
+
+    latest_amount = None
+    latest_date = None
+    for line in _iter_meaningful_lines(text):
+        if not any(keyword in line for keyword in keywords):
+            continue
+        amount_matches = list(_AMOUNT_RE.finditer(line))
+        if not amount_matches:
+            continue
+        latest_amount = _amount_match_to_yuan(amount_matches[-1])
+        latest_date = _normalize_date(line) or fallback_date
+
+    return latest_amount, latest_date
+
+
+def _infer_transaction_status(*texts: str, fallback: str | None = None) -> str | None:
+    combined = "\n".join(text for text in texts if text)
+    if any(keyword in combined for keyword in ("已交易", "已成交", "完成交割", "完成交易", "成交")):
+        return "已交易"
+    if any(keyword in combined for keyword in ("终止", "不推进", "停止推进", "终止推进", "终止交易")):
+        return "终止"
+    if any(keyword in combined for keyword in ("暂停", "搁置", "暂缓")):
+        return "暂停"
+    if any(keyword in combined for keyword in ("推进", "继续推进", "沟通中", "接触中", "推进中")):
+        return "推进中"
+    return fallback
+
+
+def _infer_deal_path(*texts: str, fallback: str | None = None) -> str | None:
+    combined = "\n".join(text for text in texts if text)
+    for candidate in ("股权转让", "资产转让", "增资扩股", "控股权转让", "债转股"):
+        if candidate in combined:
+            return candidate
+    return fallback
+
+
+def _infer_willingness(*texts: str, fallback: str | None = None) -> str | None:
+    combined = "\n".join(text for text in texts if text)
+    for candidate in ("继续推进", "出售意愿明确", "有意愿", "意愿较强", "观望", "暂不推进"):
+        if candidate in combined:
+            return candidate
+    return fallback
+
+
+def _build_referral_status_preview(text: str, fallback: str | None = None) -> str | None:
+    lines = _iter_meaningful_lines(text)
+    if not lines:
+        return fallback
+    return "\n".join(lines[:5])
+
+
+def _normalize_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _rebuild_manual_v4_state(
+    report_meta: dict[str, Any],
+    existing_metadata: dict[str, Any],
+    chunk_state: dict[str, dict[str, Any]],
+    explicit_field_overrides: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any], str]:
+    from services.index_builder import build_index_bundle
+
+    explicit_field_overrides = explicit_field_overrides or {}
+    normalized = {
+        chunk_id: {
+            "summary": (chunk.get("summary") or "").strip(),
+            "content": (chunk.get("content") or "").strip(),
+            "index_tags": [str(tag).strip() for tag in (chunk.get("index_tags") or []) if str(tag).strip()],
+        }
+        for chunk_id, chunk in chunk_state.items()
+    }
+
+    index_bundle = build_index_bundle(
+        company_name=report_meta.get("company_name", ""),
+        bd_code=report_meta.get("bd_code", ""),
+        info_chunk=normalized.get("info"),
+        tracking_chunk=normalized.get("tracking"),
+    )
+    if normalized.get("info"):
+        normalized["info"]["summary"] = index_bundle.get("info_summary") or normalized["info"]["summary"]
+        normalized["info"]["index_tags"] = index_bundle.get("info_index_tags", [])
+    if normalized.get("tracking") and index_bundle.get("tracking_summary"):
+        normalized["tracking"]["summary"] = index_bundle["tracking_summary"]
+
+    existing_snapshot = existing_metadata.get("seller_fact_snapshot_json") or {}
+    info_text = normalized.get("info", {}).get("content", "")
+    tracking_text = normalized.get("tracking", {}).get("content", "")
+
+    offer_yuan, offer_date = _extract_latest_fact_from_text(
+        tracking_text,
+        ("报价", "要价", "出价", "交易价格", "对价", "挂牌价"),
+    )
+    if not offer_yuan:
+        offer_yuan, offer_date = _extract_latest_fact_from_text(
+            info_text,
+            ("报价", "要价", "出价", "交易价格", "对价", "挂牌价"),
+        )
+
+    valuation_yuan, valuation_date = _extract_latest_fact_from_text(
+        info_text,
+        ("估值", "投前估值", "投后估值", "整体估值"),
+    )
+    if not valuation_yuan:
+        valuation_yuan, valuation_date = _extract_latest_fact_from_text(
+            tracking_text,
+            ("估值", "投前估值", "投后估值", "整体估值"),
+        )
+
+    offer_yuan_value = (
+        _normalize_optional_text(explicit_field_overrides["offer_yuan"])
+        if "offer_yuan" in explicit_field_overrides
+        else offer_yuan or report_meta.get("offer_yuan") or existing_snapshot.get("offer_yuan")
+    )
+    offer_date_value = (
+        _normalize_optional_text(explicit_field_overrides["offer_date"])
+        if "offer_date" in explicit_field_overrides
+        else offer_date or report_meta.get("offer_date") or existing_snapshot.get("offer_date")
+    )
+    valuation_yuan_value = (
+        _normalize_optional_text(explicit_field_overrides["valuation_yuan"])
+        if "valuation_yuan" in explicit_field_overrides
+        else valuation_yuan or report_meta.get("valuation_yuan") or existing_snapshot.get("valuation_yuan")
+    )
+    valuation_date_value = (
+        _normalize_optional_text(explicit_field_overrides["valuation_date"])
+        if "valuation_date" in explicit_field_overrides
+        else valuation_date or report_meta.get("valuation_date") or existing_snapshot.get("valuation_date")
+    )
+
+    referral_status = _build_referral_status_preview(
+        tracking_text,
+        fallback=report_meta.get("referral_status") or existing_snapshot.get("referral_status"),
+    )
+    if "referral_status" in explicit_field_overrides:
+        referral_status = _normalize_optional_text(explicit_field_overrides["referral_status"])
+
+    transaction_status = _infer_transaction_status(
+        tracking_text,
+        info_text,
+        fallback=report_meta.get("is_traded") or existing_snapshot.get("transaction_status"),
+    )
+    if "is_traded" in explicit_field_overrides:
+        transaction_status = _normalize_optional_text(explicit_field_overrides["is_traded"])
+
+    field_updates = {
+        "referral_status": referral_status,
+        "is_traded": transaction_status,
+        "offer_yuan": offer_yuan_value,
+        "offer_date": offer_date_value,
+        "valuation_yuan": valuation_yuan_value,
+        "valuation_date": valuation_date_value,
+    }
+
+    snapshot = {
+        **existing_snapshot,
+        "offer_yuan": field_updates["offer_yuan"],
+        "offer_date": field_updates["offer_date"],
+        "valuation_yuan": field_updates["valuation_yuan"],
+        "valuation_date": field_updates["valuation_date"],
+        "deal_path": _infer_deal_path(
+            tracking_text,
+            info_text,
+            fallback=existing_snapshot.get("deal_path"),
+        ),
+        "willingness": _infer_willingness(
+            tracking_text,
+            info_text,
+            fallback=existing_snapshot.get("willingness"),
+        ),
+        "transaction_status": transaction_status,
+        "transfer_ratio": existing_snapshot.get("transfer_ratio"),
+        "blockers": existing_snapshot.get("blockers") or [],
+        "nonpublic_risks": existing_snapshot.get("nonpublic_risks") or [],
+    }
+
+    metadata_updates = {
+        "report_schema_version": "v4",
+        "seller_fact_snapshot_json": snapshot,
+        "tracking_summary": index_bundle.get("tracking_summary"),
+        "info_summary": index_bundle.get("info_summary"),
+        "info_index_tags": index_bundle.get("info_index_tags", []),
+    }
+
+    markdown = _render_markdown_from_chunks(
+        report_meta.get("company_name") or report_meta.get("report_id") or "",
+        "v4",
+        [
+            {
+                "chunk_id": chunk_id,
+                "label": _ALL_CHUNK_LABELS.get(chunk_id, chunk_id),
+                "summary": chunk.get("summary", ""),
+                "content": chunk.get("content", ""),
+            }
+            for chunk_id, chunk in normalized.items()
+        ],
+    )
+
+    return normalized, metadata_updates, field_updates, markdown
 
 
 def _get_report_paths(report_id: str) -> dict[str, Path]:
@@ -104,7 +387,6 @@ def _get_report_paths(report_id: str) -> dict[str, Path]:
             return {
                 "md": Path(row["md_path"]),
                 "json": Path(row["md_path"]).parent / f"{report_id}.json",
-                "chunks": Path(row["chunks_path"]) if row["chunks_path"] else OUTPUT_DIR / f"{report_id}_chunks.json",
                 "debug": Path(row["debug_dir"]) if row["debug_dir"] else OUTPUT_DIR / f"{report_id}_debug",
                 "attachments": Path(row["attachments_dir"]) if row["attachments_dir"] else OUTPUT_DIR / f"{report_id}_attachments",
             }
@@ -115,7 +397,6 @@ def _get_report_paths(report_id: str) -> dict[str, Path]:
     return {
         "md": OUTPUT_DIR / f"{report_id}.md",
         "json": OUTPUT_DIR / f"{report_id}.json",
-        "chunks": OUTPUT_DIR / f"{report_id}_chunks.json",
         "debug": OUTPUT_DIR / f"{report_id}_debug",
         "attachments": OUTPUT_DIR / f"{report_id}_attachments",
     }
@@ -138,22 +419,22 @@ def _load_report_meta(report_id: str) -> dict | None:
         if row:
             # Convert row to dict
             meta = dict(row)
+            meta.pop("locked_fields", None)
             # Parse JSON fields
-            if meta.get("locked_fields"):
-                try:
-                    meta["locked_fields"] = json.loads(meta["locked_fields"])
-                except:
-                    meta["locked_fields"] = []
             if meta.get("push_records"):
                 try:
                     meta["push_records"] = json.loads(meta["push_records"])
                 except:
                     meta["push_records"] = {}
+            else:
+                meta["push_records"] = {}
             if meta.get("attachments"):
                 try:
                     meta["attachments"] = json.loads(meta["attachments"])
                 except:
                     meta["attachments"] = []
+            else:
+                meta["attachments"] = []
             return meta
     except Exception as e:
         log.warning(f"Failed to load report {report_id} from database: {e}")
@@ -165,7 +446,10 @@ def _load_report_meta(report_id: str) -> dict | None:
 
     if meta_path.exists():
         try:
-            return json.loads(meta_path.read_text(encoding="utf-8"))
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(meta, dict):
+                meta.pop("locked_fields", None)
+            return meta
         except Exception:
             pass
 
@@ -212,6 +496,178 @@ def _load_report_meta(report_id: str) -> dict | None:
     return None
 
 
+def _artifact_paths_for_report(report_id: str) -> list[Path]:
+    """Collect all local artifact paths that may belong to a report."""
+    paths = _get_report_paths(report_id)
+    candidates = [
+        paths["md"],
+        paths["json"],
+        paths["debug"],
+        paths["attachments"],
+        OUTPUT_DIR / f"{report_id}.md",
+        OUTPUT_DIR / f"{report_id}.json",
+        OUTPUT_DIR / f"{report_id}_debug",
+        OUTPUT_DIR / f"{report_id}_attachments",
+    ]
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _delete_report_artifacts(report_id: str) -> None:
+    """Best-effort deletion of all local files/directories for a report."""
+    for path in _artifact_paths_for_report(report_id):
+        if path.is_dir():
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+
+
+def _delete_report_related_rows(conn, report_id: str) -> None:
+    """Delete rows that may survive in older DB schemas without FK cascade."""
+    statements = [
+        ("DELETE FROM report_chunks WHERE report_id = ?", (report_id,)),
+        ("DELETE FROM intake_logs WHERE report_id = ?", (report_id,)),
+        ("DELETE FROM pipeline_tasks WHERE report_id = ? OR task_id = ?", (report_id, report_id)),
+        ("DELETE FROM reports WHERE report_id = ?", (report_id,)),
+    ]
+    for sql, params in statements:
+        try:
+            conn.execute(sql, params)
+        except Exception as e:
+            log.warning("Failed cleanup SQL for report %s: %s", report_id, e)
+
+
+def _report_exists(report_id: str) -> bool:
+    """Check whether a report exists in DB or local artifacts."""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT 1 FROM reports WHERE report_id = ?",
+            (report_id,),
+        ).fetchone()
+        conn.close()
+        if row:
+            return True
+    except Exception:
+        pass
+    return _load_report_meta(report_id) is not None
+
+
+def _has_chunks(report_id: str) -> bool:
+    """Return whether a report has stored chunk records."""
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM report_chunks WHERE report_id = ?",
+            (report_id,),
+        ).fetchone()
+        conn.close()
+        return bool(row and row["cnt"] > 0)
+    except Exception:
+        return False
+
+
+def _collect_attachments(report_id: str) -> list[dict]:
+    """Read attachment metadata from the report attachment directory."""
+    files: list[dict] = []
+    att_dir = _get_report_paths(report_id)["attachments"]
+    if att_dir.exists():
+        for fp in sorted(att_dir.iterdir()):
+            if fp.is_file():
+                files.append({"filename": fp.name, "size": fp.stat().st_size})
+    return files
+
+
+def _sync_attachments_db(report_id: str, attachments: list[dict]) -> None:
+    """Persist attachments list to DB (source of truth for list page)."""
+    try:
+        conn = get_db()
+        conn.execute(
+            "UPDATE reports SET attachments = ?, updated_at = ? WHERE report_id = ?",
+            (
+                json.dumps(attachments, ensure_ascii=False),
+                __import__("datetime").datetime.now().isoformat(),
+                report_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.error(f"Failed to update attachments in database for {report_id}: {e}")
+
+
+def _build_v3_markdown(report_id: str) -> tuple[str, str] | None:
+    """Build markdown from report chunks. Returns (company_name, markdown)."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT company_name, report_format FROM reports WHERE report_id = ?",
+            (report_id,),
+        ).fetchone()
+        if not row:
+            return None
+        chunk_rows = conn.execute(
+            "SELECT chunk_id, label, summary, content FROM report_chunks "
+            "WHERE report_id = ? ORDER BY chunk_id",
+            (report_id,),
+        ).fetchall()
+        if not chunk_rows:
+            return None
+        company_name = row["company_name"] or report_id
+        report_format = row["report_format"] or "v3"
+        markdown = _render_markdown_from_chunks(
+            company_name,
+            report_format,
+            [dict(cr) for cr in chunk_rows],
+        )
+        return company_name, markdown
+    finally:
+        conn.close()
+
+
+def _load_v3_chunks(report_id: str) -> list[dict]:
+    """Load report chunks from DB for chunk editor / FastGPT push."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT chunk_id, label, summary, content, index_tags FROM report_chunks "
+            "WHERE report_id = ? ORDER BY chunk_id",
+            (report_id,),
+        ).fetchall()
+        chunks: list[dict] = []
+        for row in rows:
+            title = row["label"] or _ALL_CHUNK_LABELS.get(row["chunk_id"], row["chunk_id"])
+            q_parts = []
+            if row["summary"]:
+                q_parts.append(f"摘要：{row['summary']}")
+            if row["content"]:
+                q_parts.append(row["content"])
+            q_text = "\n\n".join(q_parts) if q_parts else ""
+            try:
+                raw_tags = json.loads(row["index_tags"]) if row["index_tags"] else []
+            except Exception:
+                raw_tags = []
+            chunks.append({
+                "title": title,
+                "q": q_text,
+                "indexes": [{"text": str(tag)} for tag in raw_tags if str(tag).strip()],
+                "chunk_id": row["chunk_id"],
+                "summary": row["summary"] or "",
+                "content": row["content"] or "",
+            })
+        return chunks
+    finally:
+        conn.close()
+
+
 def _compute_push_status(
     report_id: str,
     push_records: dict,
@@ -222,29 +678,24 @@ def _compute_push_status(
     Returns (status, push_info) where status is one of:
       no_chunks, not_pushed, pushed, outdated
     """
-    paths = _get_report_paths(report_id)
-    chunks_path = paths["chunks"]
-    if not chunks_path.exists():
+    # Stopgap optimization: list page should not recompute chunk hashes per row.
+    # We only derive a lightweight status from chunk presence and push records.
+    if not _has_chunks(report_id):
         return "no_chunks", None
     if not dataset_id or dataset_id not in push_records:
         return "not_pushed", None
     record = push_records[dataset_id]
-    try:
-        current_hash = compute_chunks_hash(report_id)
-    except Exception:
-        return "not_pushed", None
-    if record.get("chunks_hash") == current_hash:
-        return "pushed", record
-    return "outdated", record
+    return "pushed", record
 
 
 @router.get("/list")
 async def list_reports(
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    search: str | None = Query(None, description="Search in company_name, bd_code"),
+    search: str | None = Query(None, description="Search in project/company/industry/tags/bd_code"),
     status: str | None = Query(None, description="Filter by status"),
     rating: str | None = Query(None, description="Filter by rating"),
+    feasibility_rating: str | None = Query(None, description="Filter by feasibility rating (A-E)"),
     owner: str | None = Query(None, description="Filter by owner (admin only)"),
     sort_by: str = Query("created_at", description="Sort field"),
     sort_dir: str = Query("desc", regex="^(asc|desc)$", description="Sort direction"),
@@ -283,12 +734,17 @@ async def list_reports(
         if rating:
             where_clauses.append("(rating = ? OR manual_rating = ?)")
             params.extend([rating, rating])
+        if feasibility_rating:
+            where_clauses.append("feasibility_rating = ?")
+            params.append(feasibility_rating)
 
         # Search filter
         if search:
-            where_clauses.append("(company_name LIKE ? OR bd_code LIKE ?)")
+            where_clauses.append(
+                "(project_name LIKE ? OR company_name LIKE ? OR bd_code LIKE ? OR industry LIKE ? OR industry_tags LIKE ?)"
+            )
             search_pattern = f"%{search}%"
-            params.extend([search_pattern, search_pattern])
+            params.extend([search_pattern, search_pattern, search_pattern, search_pattern, search_pattern])
 
         # Build WHERE clause string
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
@@ -301,19 +757,36 @@ async def list_reports(
         offset = (page - 1) * page_size
         total_pages = (total + page_size - 1) // page_size
 
-        # Validate sort_by field (prevent SQL injection)
+        # Validate sort_by field and map to SQL order clause (prevent SQL injection)
+        sort_dir_sql = "ASC" if sort_dir.lower() == "asc" else "DESC"
         allowed_sort_fields = {
-            "created_at", "updated_at", "company_name", "bd_code",
-            "score", "rating", "status", "province", "industry"
+            "created_at", "updated_at", "company_name", "project_name", "bd_code",
+            "score", "rating", "status", "province", "industry", "estimated_cost",
+            "feasibility_rating", "offer_or_valuation",
         }
         if sort_by not in allowed_sort_fields:
             sort_by = "created_at"
+
+        if sort_by == "feasibility_rating":
+            rating_order_expr = (
+                "CASE feasibility_rating "
+                "WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 "
+                "WHEN 'D' THEN 4 WHEN 'E' THEN 5 ELSE NULL END"
+            )
+            order_clause = f"({rating_order_expr}) IS NULL, ({rating_order_expr}) {sort_dir_sql}"
+        elif sort_by == "offer_or_valuation":
+            offer_expr = "COALESCE(NULLIF(offer_yuan, ''), NULLIF(valuation_yuan, ''))"
+            order_clause = (
+                f"({offer_expr}) IS NULL, CAST({offer_expr} AS REAL) {sort_dir_sql}"
+            )
+        else:
+            order_clause = f"{sort_by} IS NULL, {sort_by} {sort_dir_sql}"
 
         # Build and execute main query
         query = f"""
             SELECT * FROM reports
             WHERE {where_sql}
-            ORDER BY {sort_by} {sort_dir.upper()}
+            ORDER BY {order_clause}
             LIMIT ? OFFSET ?
         """
         rows = cursor.execute(query, params + [page_size, offset]).fetchall()
@@ -338,6 +811,13 @@ async def list_reports(
                     meta["attachments"] = json.loads(meta["attachments"])
                 except:
                     meta["attachments"] = []
+            else:
+                meta["attachments"] = []
+
+            # Older reports may not have attachments JSON backfilled yet.
+            # Fallback to attachment directory so homepage count is accurate.
+            if not meta["attachments"]:
+                meta["attachments"] = _collect_attachments(meta["report_id"])
 
             # Compute push status
             report_id = meta["report_id"]
@@ -391,258 +871,6 @@ async def list_reports(
     }
 
 
-@router.post("/generate")
-async def generate_report(req: GenerateRequest, user: dict = Depends(get_current_user)):
-    """Start report generation; returns task_id for SSE progress."""
-    try:
-        session = get_upload_session(req.session_id)
-    except HTTPException:
-        raise HTTPException(404, "Session not found")
-
-    # Find the Excel row
-    excel_row = None
-    for row in session["all_rows"]:
-        if str(row.get("bd_code", "")) == req.bd_code:
-            excel_row = row
-            break
-    if not excel_row:
-        raise HTTPException(404, f"Company {req.bd_code} not found in Excel")
-
-    # Collect attachment texts with filenames
-    # Primary: use pre-parsed texts from upload (parsed from in-memory bytes,
-    # avoids TSD filesystem encryption corrupting files on disk)
-    attachment_items: list[tuple[str, str]] = []  # (filename, text)
-    failed_attachments: list[str] = []
-
-    pre_parsed = session.get("parsed_texts", {}).get(req.bd_code, [])
-    if pre_parsed:
-        log.info("Using %d pre-parsed attachment(s) for bd_code=%s", len(pre_parsed), req.bd_code)
-        for filename, text in pre_parsed:
-            if text and text.strip():
-                attachment_items.append((filename, text))
-                log.info("Pre-parsed attachment: %s → %d chars", filename, len(text))
-            else:
-                log.warning("Pre-parsed attachment empty: %s", filename)
-                failed_attachments.append(f"{filename} (解析结果为空)")
-    else:
-        # Fallback: parse from disk (for sessions created before in-memory parsing)
-        all_attachment_paths = session.get("attachments", {}).get(req.bd_code, [])
-        log.info("No pre-parsed texts, falling back to disk parsing for %d file(s), bd_code=%s",
-                 len(all_attachment_paths), req.bd_code)
-
-        for fpath in all_attachment_paths:
-            p = Path(fpath)
-            try:
-                if not p.exists():
-                    log.warning("Attachment file not found: %s", fpath)
-                    failed_attachments.append(f"{p.name} (文件不存在)")
-                    continue
-                file_size = p.stat().st_size
-                if file_size == 0:
-                    log.warning("Attachment file is empty (0 bytes): %s", fpath)
-                    failed_attachments.append(f"{p.name} (文件为空)")
-                    continue
-
-                log.info("Parsing attachment from disk: %s (%d bytes)", p.name, file_size)
-                text = ""
-                if p.suffix.lower() == ".pdf":
-                    text = extract_pdf_text(p)
-                elif p.suffix.lower() in (".md", ".txt"):
-                    text = read_md(p)
-                elif p.suffix.lower() == ".docx":
-                    text = extract_docx_text(p)
-                elif p.suffix.lower() == ".pptx":
-                    text = extract_pptx_text(p)
-
-                if text:
-                    attachment_items.append((p.name, text))
-                    log.info("Successfully parsed attachment: %s → %d chars", p.name, len(text))
-                else:
-                    log.warning("Attachment parsed but returned empty text: %s", p.name)
-                    failed_attachments.append(f"{p.name} (解析结果为空)")
-            except Exception as e:
-                log.exception("Failed to parse attachment: %s", fpath)
-                failed_attachments.append(f"{p.name} ({e})")
-
-    # Determine report_id: reuse for regeneration, or create new
-    is_regeneration = False
-    if req.report_id:
-        report_id = req.report_id
-        paths = _get_report_paths(report_id)
-        is_regeneration = paths["md"].exists()
-        # Include existing attachments from the report's attachment dir
-        att_dir = paths["attachments"]
-        if att_dir.exists():
-            session_filenames = {name for name, _ in attachment_items}
-            for fp in sorted(att_dir.iterdir()):
-                if not fp.is_file() or fp.name in session_filenames:
-                    continue
-                try:
-                    text = _parse_attachment_file(fp)
-                    if text and text.strip():
-                        attachment_items.append((fp.name, text))
-                        log.info("Existing attachment: %s → %d chars", fp.name, len(text))
-                except Exception as e:
-                    log.warning("Failed to parse existing attachment %s: %s", fp.name, e)
-    else:
-        report_id = uuid.uuid4().hex[:12]
-
-    task_id = report_id  # Use report_id as task_id for SSE
-
-    # Copy session attachment files to report attachment dir
-    paths = _get_report_paths(report_id)
-    att_dir = paths["attachments"]
-    att_dir.mkdir(exist_ok=True)
-    session_file_paths = session.get("attachments", {}).get(req.bd_code, [])
-    for fpath in session_file_paths:
-        p = Path(fpath)
-        if p.exists():
-            dest = att_dir / p.name
-            if not dest.exists():
-                shutil.copy2(str(p), str(dest))
-
-    # Build attachment info for metadata
-    attachments_info = []
-    if att_dir.exists():
-        for fp in sorted(att_dir.iterdir()):
-            if fp.is_file():
-                attachments_info.append({"filename": fp.name, "size": fp.stat().st_size})
-
-    log.info(
-        "Generate report: bd_code=%s, report_id=%s, regen=%s, parsed=%d, failed=%d",
-        req.bd_code, report_id, is_regeneration,
-        len(attachment_items), len(failed_attachments),
-    )
-    if failed_attachments:
-        log.warning("Failed attachments: %s", failed_attachments)
-
-    # Create task record in database
-    await task_manager.create_task(
-        task_id=task_id,
-        report_id=report_id,
-        excel_row=excel_row,
-        attachment_items=attachment_items,
-        failed_attachments=failed_attachments,
-        owner=user["username"],
-        attachments_info=attachments_info,
-        is_regeneration=is_regeneration,
-    )
-
-    # Launch pipeline in background with task manager
-    async def pipeline_task():
-        await run_pipeline(
-            task_id, excel_row, attachment_items, failed_attachments,
-            owner=user["username"], attachments_info=attachments_info,
-            is_regeneration=is_regeneration,
-        )
-
-    await task_manager.start_task(task_id, pipeline_task)
-
-    return {"task_id": task_id}
-
-
-@router.post("/batch-generate")
-async def batch_generate_reports(req: BatchGenerateRequest, user: dict = Depends(get_current_user)):
-    """Start batch report generation; returns list of task_ids for SSE progress tracking."""
-    try:
-        session = get_upload_session(req.session_id)
-    except HTTPException:
-        raise HTTPException(404, "Session not found")
-
-    task_ids = []
-
-    for bd_code in req.bd_codes:
-        # Find the Excel row
-        excel_row = None
-        for row in session["all_rows"]:
-            if str(row.get("bd_code", "")) == bd_code:
-                excel_row = row
-                break
-        if not excel_row:
-            log.warning(f"Company {bd_code} not found in Excel, skipping")
-            continue
-
-        # Collect attachment texts
-        attachment_items: list[tuple[str, str]] = []
-        failed_attachments: list[str] = []
-
-        pre_parsed = session.get("parsed_texts", {}).get(bd_code, [])
-        if pre_parsed:
-            for filename, text in pre_parsed:
-                if text and text.strip():
-                    attachment_items.append((filename, text))
-                else:
-                    failed_attachments.append(f"{filename} (解析结果为空)")
-        else:
-            all_attachment_paths = session.get("attachments", {}).get(bd_code, [])
-            for fpath in all_attachment_paths:
-                p = Path(fpath)
-                try:
-                    if not p.exists():
-                        failed_attachments.append(f"{p.name} (文件不存在)")
-                        continue
-                    text = _parse_attachment_file(p)
-                    if text:
-                        attachment_items.append((p.name, text))
-                    else:
-                        failed_attachments.append(f"{p.name} (解析结果为空)")
-                except Exception as e:
-                    failed_attachments.append(f"{p.name} ({e})")
-
-        # Create new report
-        report_id = uuid.uuid4().hex[:12]
-        task_id = report_id
-
-        # Copy attachments
-        paths = _get_report_paths(report_id)
-        att_dir = paths["attachments"]
-        att_dir.mkdir(exist_ok=True)
-        session_file_paths = session.get("attachments", {}).get(bd_code, [])
-        for fpath in session_file_paths:
-            p = Path(fpath)
-            if p.exists():
-                dest = att_dir / p.name
-                if not dest.exists():
-                    shutil.copy2(str(p), str(dest))
-
-        # Build attachment info
-        attachments_info = []
-        if att_dir.exists():
-            for fp in sorted(att_dir.iterdir()):
-                if fp.is_file():
-                    attachments_info.append({"filename": fp.name, "size": fp.stat().st_size})
-
-        log.info(
-            "Batch generate: bd_code=%s, report_id=%s, parsed=%d, failed=%d",
-            bd_code, report_id, len(attachment_items), len(failed_attachments),
-        )
-
-        # Create task record
-        await task_manager.create_task(
-            task_id=task_id,
-            report_id=report_id,
-            excel_row=excel_row,
-            attachment_items=attachment_items,
-            failed_attachments=failed_attachments,
-            owner=user["username"],
-            attachments_info=attachments_info,
-            is_regeneration=False,
-        )
-
-        # Launch pipeline in background
-        async def pipeline_task():
-            await run_pipeline(
-                task_id, excel_row, attachment_items, failed_attachments,
-                owner=user["username"], attachments_info=attachments_info,
-                is_regeneration=False,
-            )
-
-        await task_manager.start_task(task_id, pipeline_task)
-        task_ids.append(task_id)
-
-    return {"task_ids": task_ids, "count": len(task_ids)}
-
-
 @router.get("/progress/{task_id}")
 async def progress_stream(task_id: str):
     """SSE stream for real-time pipeline progress."""
@@ -676,21 +904,12 @@ async def delete_report(report_id: str, user: dict = Depends(get_current_user)):
     """Delete a single report and its metadata, including FastGPT collection."""
     from db import get_db
 
-    paths = _get_report_paths(report_id)
-    md_path = paths["md"]
-    meta_path = paths["json"]
-    chunks_path = paths["chunks"]
-    att_dir = paths["attachments"]
-
-    if not md_path.exists():
-        raise HTTPException(404, "Report not found")
-
     _check_report_access(report_id, user)
 
     # Delete FastGPT collection if exists
     meta = _load_report_meta(report_id)
     if meta:
-        push_records = meta.get("push_records", {})
+        push_records = meta.get("push_records") or {}
         settings = load_settings()
         fastgpt_cfg = {**DEFAULT_FASTGPT_CONFIG, **settings.get("fastgpt", {})}
 
@@ -705,25 +924,25 @@ async def delete_report(report_id: str, user: dict = Depends(get_current_user)):
                     log.warning("Failed to delete FastGPT collection %s: %s", collection_id, e)
 
     # Delete local files
-    md_path.unlink(missing_ok=True)
-    meta_path.unlink(missing_ok=True)
-    chunks_path.unlink(missing_ok=True)
-
-    # Delete attachment directory
-    if att_dir.exists():
-        import shutil
-        shutil.rmtree(att_dir, ignore_errors=True)
+    _delete_report_artifacts(report_id)
 
     # Delete from database
     try:
         conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM reports WHERE report_id = ?", (report_id,))
+        _delete_report_related_rows(conn, report_id)
         conn.commit()
         conn.close()
         log.info(f"Deleted report {report_id} from database")
     except Exception as e:
         log.error(f"Failed to delete report {report_id} from database: {e}")
+
+    try:
+        from routers.intake import cleanup_runtime_state_for_report
+        cleared_task_ids = cleanup_runtime_state_for_report(report_id)
+        if cleared_task_ids:
+            log.info("Cleared runtime intake state for report %s: %s", report_id, cleared_task_ids)
+    except Exception as e:
+        log.warning("Failed to clear runtime intake state for report %s: %s", report_id, e)
 
     return {"deleted": report_id}
 
@@ -738,52 +957,45 @@ async def batch_delete(req: BatchDeleteRequest, user: dict = Depends(get_current
     fastgpt_cfg = {**DEFAULT_FASTGPT_CONFIG, **settings.get("fastgpt", {})}
 
     for rid in req.report_ids:
-        paths = _get_report_paths(rid)
-        md_path = paths["md"]
-        meta_path = paths["json"]
-        chunks_path = paths["chunks"]
-        att_dir = paths["attachments"]
+        try:
+            _check_report_access(rid, user)
+        except HTTPException:
+            continue
 
-        if md_path.exists():
-            try:
-                _check_report_access(rid, user)
-            except HTTPException:
-                continue
+        # Delete FastGPT collections
+        meta = _load_report_meta(rid)
+        if meta:
+            push_records = meta.get("push_records") or {}
+            for dataset_id, record in push_records.items():
+                collection_id = record.get("collection_id")
+                if collection_id:
+                    try:
+                        await delete_collection(collection_id, fastgpt_cfg)
+                        log.info("Deleted FastGPT collection %s for report %s", collection_id, rid)
+                    except Exception as e:
+                        log.warning("Failed to delete FastGPT collection %s: %s", collection_id, e)
 
-            # Delete FastGPT collections
-            meta = _load_report_meta(rid)
-            if meta:
-                push_records = meta.get("push_records", {})
-                for dataset_id, record in push_records.items():
-                    collection_id = record.get("collection_id")
-                    if collection_id:
-                        try:
-                            await delete_collection(collection_id, fastgpt_cfg)
-                            log.info("Deleted FastGPT collection %s for report %s", collection_id, rid)
-                        except Exception as e:
-                            log.warning("Failed to delete FastGPT collection %s: %s", collection_id, e)
+        # Delete local files
+        _delete_report_artifacts(rid)
 
-            # Delete local files
-            md_path.unlink(missing_ok=True)
-            meta_path.unlink(missing_ok=True)
-            chunks_path.unlink(missing_ok=True)
+        # Delete from database
+        try:
+            conn = get_db()
+            _delete_report_related_rows(conn, rid)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error(f"Failed to delete report {rid} from database: {e}")
 
-            # Delete attachment directory
-            if att_dir.exists():
-                import shutil
-                shutil.rmtree(att_dir, ignore_errors=True)
+        try:
+            from routers.intake import cleanup_runtime_state_for_report
+            cleared_task_ids = cleanup_runtime_state_for_report(rid)
+            if cleared_task_ids:
+                log.info("Cleared runtime intake state for report %s: %s", rid, cleared_task_ids)
+        except Exception as e:
+            log.warning("Failed to clear runtime intake state for report %s: %s", rid, e)
 
-            # Delete from database
-            try:
-                conn = get_db()
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM reports WHERE report_id = ?", (rid,))
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                log.error(f"Failed to delete report {rid} from database: {e}")
-
-            deleted.append(rid)
+        deleted.append(rid)
 
     return {"deleted": deleted}
 
@@ -791,188 +1003,353 @@ async def batch_delete(req: BatchDeleteRequest, user: dict = Depends(get_current
 @router.get("/{report_id}")
 async def get_report(report_id: str, user: dict = Depends(get_current_user)):
     """Return the generated report markdown."""
+    _check_report_access(report_id, user)
     paths = _get_report_paths(report_id)
     report_path = paths["md"]
-    if not report_path.exists():
-        raise HTTPException(404, "Report not found")
-    _check_report_access(report_id, user)
-    content = report_path.read_text(encoding="utf-8")
-    return {"report_id": report_id, "content": content}
+    if report_path.exists():
+        content = report_path.read_text(encoding="utf-8")
+        return {"report_id": report_id, "content": content}
+
+    built = _build_v3_markdown(report_id)
+    if built:
+        _, markdown = built
+        meta = _load_report_meta(report_id) or {}
+        return {
+            "report_id": report_id,
+            "content": markdown,
+            "format": meta.get("report_format") or "v3",
+        }
+
+    raise HTTPException(404, "Report not found")
 
 
 @router.get("/{report_id}/chunks")
 async def get_chunks(report_id: str, user: dict = Depends(get_current_user)):
-    """Return the chunks JSON for a report."""
+    """Return report chunks for a report."""
     _check_report_access(report_id, user)
-    paths = _get_report_paths(report_id)
-    chunks_path = paths["chunks"]
-    if not chunks_path.exists():
+    chunks = _load_v3_chunks(report_id)
+    if not chunks:
         raise HTTPException(404, "Chunks not found")
-    chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
-    return {"chunks": chunks}
+    meta = _load_report_meta(report_id) or {}
+    return {"chunks": chunks, "format": meta.get("report_format") or "v4"}
 
 
 @router.put("/{report_id}/chunks")
 async def save_chunks(report_id: str, chunks: list[ReportChunk], user: dict = Depends(get_current_user)):
-    """Save edited chunks JSON."""
+    """Save edited chunks."""
     _check_report_access(report_id, user)
-    paths = _get_report_paths(report_id)
-    chunks_path = paths["chunks"]
     data = [c.model_dump() for c in chunks]
-    chunks_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"status": "ok", "count": len(data)}
+    now = __import__("datetime").datetime.now().isoformat()
+    report_meta = _load_report_meta(report_id) or {"report_id": report_id}
+    from services.pipeline_v3 import _load_report_metadata_json
 
+    raw_chunk_state: dict[str, dict[str, Any]] = {}
+    for idx, chunk in enumerate(data):
+        chunk_id = chunk.get("chunk_id") or ("info" if idx == 0 else f"chunk{idx}")
+        raw_chunk_state[chunk_id] = {
+            "summary": chunk.get("summary", ""),
+            "content": chunk.get("content") or chunk.get("q", ""),
+            "index_tags": [
+                item.get("text", "")
+                for item in (chunk.get("indexes") or [])
+                if item.get("text", "").strip()
+            ],
+        }
 
-@router.post("/{report_id}/regenerate-chunks")
-async def regenerate_chunks(report_id: str, user: dict = Depends(get_current_user)):
-    """Re-run chunking + AI indexing for an existing report."""
-    _check_report_access(report_id, user)
+    existing_metadata = _load_report_metadata_json(report_id)
+    normalized_chunks, metadata_updates, field_updates, markdown = _rebuild_manual_v4_state(
+        report_meta,
+        existing_metadata,
+        raw_chunk_state,
+    )
+    merged_metadata = {**existing_metadata, **metadata_updates}
+    next_status = "updated" if (report_meta.get("status") or "completed") == "completed" else (report_meta.get("status") or "completed")
+    file_size = len(markdown.encode("utf-8"))
+
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM report_chunks WHERE report_id = ?", (report_id,))
+        for chunk_id, chunk_data in normalized_chunks.items():
+            conn.execute(
+                """INSERT OR REPLACE INTO report_chunks
+                   (report_id, chunk_id, label, summary, content, index_tags, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    report_id,
+                    chunk_id,
+                    _ALL_CHUNK_LABELS.get(chunk_id, chunk_id),
+                    chunk_data.get("summary", ""),
+                    chunk_data.get("content", ""),
+                    json.dumps(chunk_data.get("index_tags", []), ensure_ascii=False),
+                    now,
+                ),
+            )
+        conn.execute(
+            "UPDATE reports SET updated_at = ?, report_format = ?, status = ?, "
+            "metadata_json = ?, referral_status = ?, is_traded = ?, offer_yuan = ?, offer_date = ?, "
+            "valuation_yuan = ?, valuation_date = ?, file_size = ? WHERE report_id = ?",
+            (
+                now,
+                "v4",
+                next_status,
+                json.dumps(merged_metadata, ensure_ascii=False),
+                field_updates.get("referral_status"),
+                field_updates.get("is_traded"),
+                field_updates.get("offer_yuan"),
+                field_updates.get("offer_date"),
+                field_updates.get("valuation_yuan"),
+                field_updates.get("valuation_date"),
+                file_size,
+                report_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     paths = _get_report_paths(report_id)
-    report_path = paths["md"]
-    meta_path = paths["json"]
-    if not report_path.exists():
-        raise HTTPException(404, "Report not found")
-    report_md = report_path.read_text(encoding="utf-8")
-    metadata = {}
-    if meta_path.exists():
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-    settings = load_settings()
-    ai = settings.get("ai_config", {})
-    chk_cfg = ai.get("chunker", {})
-    # Fallback to extractor key if chunker has no API key
-    if not chk_cfg.get("api_key"):
-        fallback = ai.get("extractor", {})
-        chk_cfg = {**chk_cfg, "api_key": fallback.get("api_key", ""),
-                    "base_url": chk_cfg.get("base_url") or fallback.get("base_url", ""),
-                    "model": chk_cfg.get("model") or fallback.get("model", "")}
-    chunks = await chunk_and_index(report_md, metadata, chk_cfg)
-    chunks_path = paths["chunks"]
-    chunks_path.write_text(json.dumps(chunks, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"chunks": chunks, "count": len(chunks)}
+    paths["md"].parent.mkdir(parents=True, exist_ok=True)
+    paths["md"].write_text(markdown, encoding="utf-8")
+
+    if paths["json"].exists():
+        try:
+            meta = json.loads(paths["json"].read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        meta.update({
+            "report_format": "v4",
+            "status": next_status,
+            "updated_at": now,
+            "file_size": file_size,
+            "referral_status": field_updates.get("referral_status"),
+            "is_traded": field_updates.get("is_traded"),
+            "offer_yuan": field_updates.get("offer_yuan"),
+            "offer_date": field_updates.get("offer_date"),
+            "valuation_yuan": field_updates.get("valuation_yuan"),
+            "valuation_date": field_updates.get("valuation_date"),
+            "metadata_json": merged_metadata,
+        })
+        paths["json"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {"status": "ok", "count": len(data), "format": "v4"}
 
 
 @router.post("/{report_id}/push-fastgpt")
 async def push_to_fastgpt(report_id: str, user: dict = Depends(get_current_user)):
     """Push chunks to FastGPT knowledge base with improved naming and tags."""
     _check_report_access(report_id, user)
-    paths = _get_report_paths(report_id)
-    chunks_path = paths["chunks"]
-    if not chunks_path.exists():
-        raise HTTPException(404, "Chunks not found — generate chunks first")
-    chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
-
-    # Load metadata
-    meta_path = paths["json"]
-    company_name = "未知公司"
-    bd_code = report_id[:8]
-    push_records: dict = {}
-    manual_rating = None
-    rating = None
-
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        company_name = meta.get("company_name", company_name)
-        bd_code = meta.get("bd_code", bd_code)
-        push_records = meta.get("push_records", {})
-        manual_rating = meta.get("manual_rating")
-        rating = meta.get("rating")
-
-    # Calculate final rating
-    final_rating = manual_rating or rating
 
     # Load FastGPT config
     settings = load_settings()
     fastgpt_cfg = {**DEFAULT_FASTGPT_CONFIG, **settings.get("fastgpt", {})}
-    if not fastgpt_cfg.get("api_key"):
-        raise HTTPException(400, "FastGPT API Key 未配置，请在设置页面配置")
-    dataset_id = fastgpt_cfg.get("dataset_id", "")
-
-    # Delete old collection if exists for this dataset
-    old_record = push_records.get(dataset_id)
-    if old_record and old_record.get("collection_id"):
-        await delete_collection(old_record["collection_id"], fastgpt_cfg)
-
-    # Build collection name and tags
-    collection_name = f"{company_name}-{bd_code}"
-    tags = ["尽调报告", bd_code]
-    if final_rating:
-        tags.append(final_rating)
 
     try:
-        result = await push_chunks_to_fastgpt(chunks, collection_name, fastgpt_cfg, tags=tags)
-        # Save push record
-        save_push_record(report_id, dataset_id, result["collection_id"], result["uploaded"], result["total"])
-        # Return result with push_record info
-        result["push_record"] = {
-            "dataset_id": dataset_id,
-            "collection_id": result["collection_id"],
-            "uploaded": result["uploaded"],
-            "total": result["total"],
-        }
-        return result
+        return await push_report_to_fastgpt(report_id, fastgpt_cfg, replace_existing=True)
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         log.exception("FastGPT push failed for %s", report_id)
         raise HTTPException(502, f"FastGPT推送失败: {e}")
 
 
+@router.get("/{report_id}/meta")
+async def get_report_meta(report_id: str, user: dict = Depends(get_current_user)):
+    """Get report metadata including attachments."""
+    _check_report_access(report_id, user)
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM reports WHERE report_id = ?",
+            (report_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(404, "Report not found")
+
+        # Convert row to dict
+        meta = dict(row)
+        meta.pop("locked_fields", None)
+
+        # Parse attachments JSON
+        if meta.get("attachments"):
+            import json
+            try:
+                meta["attachments"] = json.loads(meta["attachments"])
+            except json.JSONDecodeError:
+                meta["attachments"] = []
+        else:
+            meta["attachments"] = []
+
+        if not meta["attachments"]:
+            meta["attachments"] = _collect_attachments(report_id)
+            if meta["attachments"]:
+                _sync_attachments_db(report_id, meta["attachments"])
+
+        return meta
+    finally:
+        conn.close()
+
+
+@router.get("/{report_id}/attachments/{filename}")
+async def download_attachment(
+    report_id: str,
+    filename: str,
+    user: dict = Depends(get_current_user)
+):
+    """Download a specific attachment file."""
+    from fastapi.responses import FileResponse
+    from utils.attachment_manager import get_attachment_path
+
+    _check_report_access(report_id, user)
+
+    file_path = get_attachment_path(report_id, filename)
+
+    if not file_path.exists():
+        raise HTTPException(404, "Attachment not found")
+
+    return FileResponse(
+        path=str(file_path),
+        filename=filename,
+        media_type="application/octet-stream"
+    )
+
+
 @router.put("/{report_id}/meta")
 async def update_report_meta(report_id: str, updates: dict, user: dict = Depends(get_current_user)):
-    """Update editable metadata fields. Auto-locks edited fields to prevent backfill overwrite."""
-    from db import get_db
-
+    """Update editable metadata fields."""
     _check_report_access(report_id, user)
     paths = _get_report_paths(report_id)
     meta_path = paths["json"]
-    if not meta_path.exists():
-        raise HTTPException(404, "Report metadata not found")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    editable_updates = {
+        key: value
+        for key, value in updates.items()
+        if key not in _PROTECTED_META_KEYS
+    }
+    if not editable_updates:
+        return {"status": "ok", "applied": 0}
 
-    # Track locked fields (user-edited fields won't be overwritten by backfill)
-    locked_fields = set(meta.get("locked_fields", []))
+    now = __import__("datetime").datetime.now().isoformat()
+    report_meta = (_load_report_meta(report_id) or {}) | editable_updates
+    applied = len(editable_updates)
 
-    applied = 0
-    for k, v in updates.items():
-        if k not in _PROTECTED_META_KEYS:
-            meta[k] = v
-            locked_fields.add(k)  # Mark as locked
-            applied += 1
+    from services.pipeline_v3 import (
+        _coerce_to_v4_chunk_state,
+        _load_existing_chunks,
+        _load_report_metadata_json,
+    )
 
-    meta["locked_fields"] = list(locked_fields)
+    existing_chunks = _coerce_to_v4_chunk_state(_load_existing_chunks(report_id) or {})
+    existing_metadata = _load_report_metadata_json(report_id)
+    is_v4_report = (
+        (report_meta.get("report_format") == "v4")
+        or ("info" in existing_chunks)
+        or ("tracking" in existing_chunks)
+    )
 
-    # Write to JSON file
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    file_size: int | None = None
+    markdown: str | None = None
+    normalized_chunks: dict[str, dict[str, Any]] | None = None
+    metadata_updates: dict[str, Any] = {}
+    derived_field_updates: dict[str, Any] = {}
 
-    # Write to database
+    if is_v4_report and existing_chunks:
+        normalized_chunks, metadata_updates, derived_field_updates, markdown = _rebuild_manual_v4_state(
+            report_meta,
+            existing_metadata,
+            existing_chunks,
+            explicit_field_overrides=editable_updates,
+        )
+        file_size = len(markdown.encode("utf-8"))
+
+    conn = get_db()
     try:
-        conn = get_db()
         cursor = conn.cursor()
 
-        # Build update query dynamically for updated fields
+        if normalized_chunks is not None:
+            cursor.execute("DELETE FROM report_chunks WHERE report_id = ?", (report_id,))
+            for chunk_id, chunk_data in normalized_chunks.items():
+                cursor.execute(
+                    """INSERT OR REPLACE INTO report_chunks
+                       (report_id, chunk_id, label, summary, content, index_tags, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        report_id,
+                        chunk_id,
+                        _ALL_CHUNK_LABELS.get(chunk_id, chunk_id),
+                        chunk_data.get("summary", ""),
+                        chunk_data.get("content", ""),
+                        json.dumps(chunk_data.get("index_tags", []), ensure_ascii=False),
+                        now,
+                    ),
+                )
+
         update_fields = []
         update_values = []
-        for k, v in updates.items():
-            if k not in _PROTECTED_META_KEYS:
-                update_fields.append(f"{k} = ?")
-                update_values.append(v)
+        for key, value in editable_updates.items():
+            update_fields.append(f"{key} = ?")
+            update_values.append(value)
 
-        if update_fields:
-            update_values.append(json.dumps(list(locked_fields)))
-            update_values.append(__import__("datetime").datetime.now().isoformat())
-            update_values.append(report_id)
+        if normalized_chunks is not None:
+            merged_metadata = {**existing_metadata, **metadata_updates}
+            for key, value in {
+                "report_format": "v4",
+                "metadata_json": json.dumps(merged_metadata, ensure_ascii=False),
+                "referral_status": derived_field_updates.get("referral_status"),
+                "is_traded": derived_field_updates.get("is_traded"),
+                "offer_yuan": derived_field_updates.get("offer_yuan"),
+                "offer_date": derived_field_updates.get("offer_date"),
+                "valuation_yuan": derived_field_updates.get("valuation_yuan"),
+                "valuation_date": derived_field_updates.get("valuation_date"),
+            }.items():
+                if key in editable_updates:
+                    continue
+                update_fields.append(f"{key} = ?")
+                update_values.append(value)
+            if file_size is not None:
+                update_fields.append("file_size = ?")
+                update_values.append(file_size)
 
-            query = f"""
-                UPDATE reports SET
-                    {', '.join(update_fields)},
-                    locked_fields = ?,
-                    updated_at = ?
-                WHERE report_id = ?
-            """
-            cursor.execute(query, update_values)
-            conn.commit()
+        update_fields.append("updated_at = ?")
+        update_values.append(now)
+        update_values.append(report_id)
 
+        query = f"""
+            UPDATE reports SET
+                {', '.join(update_fields)}
+            WHERE report_id = ?
+        """
+        cursor.execute(query, update_values)
+        conn.commit()
+    finally:
         conn.close()
-    except Exception as e:
-        log.error(f"Failed to update database for {report_id}: {e}")
+
+    if markdown is not None:
+        paths["md"].parent.mkdir(parents=True, exist_ok=True)
+        paths["md"].write_text(markdown, encoding="utf-8")
+
+    if meta_path.exists():
+        try:
+            sidecar = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            sidecar = {}
+        sidecar.pop("locked_fields", None)
+        sidecar.update(editable_updates)
+        sidecar["updated_at"] = now
+        if normalized_chunks is not None:
+            sidecar.update({
+                "report_format": "v4",
+                "metadata_json": {**existing_metadata, **metadata_updates},
+                "referral_status": derived_field_updates.get("referral_status"),
+                "is_traded": derived_field_updates.get("is_traded"),
+                "offer_yuan": derived_field_updates.get("offer_yuan"),
+                "offer_date": derived_field_updates.get("offer_date"),
+                "valuation_yuan": derived_field_updates.get("valuation_yuan"),
+                "valuation_date": derived_field_updates.get("valuation_date"),
+            })
+            if file_size is not None:
+                sidecar["file_size"] = file_size
+        meta_path.write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {"status": "ok", "applied": applied}
 
@@ -980,33 +1357,47 @@ async def update_report_meta(report_id: str, updates: dict, user: dict = Depends
 @router.post("/{report_id}/confirm")
 async def confirm_report(report_id: str, user: dict = Depends(get_current_user)):
     """Confirm an updated report: status 'updated' → 'completed'."""
-    from db import get_db
-
     _check_report_access(report_id, user)
-    paths = _get_report_paths(report_id)
-    meta_path = paths["json"]
-    if not meta_path.exists():
+    meta = _load_report_meta(report_id)
+    if not meta:
         raise HTTPException(404, "Report metadata not found")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
     if meta.get("status") != "updated":
         raise HTTPException(400, "报告状态不是[已更新]，无需确认")
-    meta["status"] = "completed"
 
-    # Write to JSON file
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # Write to database
+    # Database is the source of truth. Use conditional update to avoid stale writes.
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE reports SET status = ?, updated_at = ? WHERE report_id = ?",
-            ("completed", __import__("datetime").datetime.now().isoformat(), report_id)
+            "UPDATE reports SET status = ?, updated_at = ? WHERE report_id = ? AND status = ?",
+            (
+                "completed",
+                __import__("datetime").datetime.now().isoformat(),
+                report_id,
+                "updated",
+            ),
         )
+        if cursor.rowcount == 0:
+            conn.close()
+            raise HTTPException(400, "报告状态不是[已更新]，无需确认")
         conn.commit()
         conn.close()
+    except HTTPException:
+        raise
     except Exception as e:
-        log.error(f"Failed to update database for {report_id}: {e}")
+        log.error(f"Failed to confirm report in database for {report_id}: {e}")
+        raise HTTPException(500, "确认失败：数据库更新异常")
+
+    # Sync sidecar JSON if present.
+    paths = _get_report_paths(report_id)
+    meta_path = paths["json"]
+    if meta_path.exists():
+        try:
+            file_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            file_meta["status"] = "completed"
+            meta_path.write_text(json.dumps(file_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            log.warning(f"Failed to sync JSON metadata for {report_id}: {e}")
 
     return {"status": "ok"}
 
@@ -1021,55 +1412,20 @@ async def update_report_content(
     req: UpdateContentRequest,
     user: dict = Depends(get_current_user)
 ):
-    """Update report markdown content."""
-    from db import get_db
-
+    """Reject direct markdown edits; v4 edits must go through fact chunks."""
+    _ = req
     _check_report_access(report_id, user)
-    paths = _get_report_paths(report_id)
-    report_path = paths["md"]
-    if not report_path.exists():
-        raise HTTPException(404, "Report not found")
-
-    # Write updated content
-    report_path.write_text(req.content, encoding="utf-8")
-
-    # Update file_size and status in metadata
-    meta_path = paths["json"]
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta["file_size"] = report_path.stat().st_size
-        if meta.get("status") == "completed":
-            meta["status"] = "updated"
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # Update database
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE reports SET file_size = ?, status = ?, updated_at = ? WHERE report_id = ?",
-                (meta["file_size"], meta.get("status", "completed"),
-                 __import__("datetime").datetime.now().isoformat(), report_id)
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.error(f"Failed to update database for {report_id}: {e}")
-
-    return {"status": "ok", "file_size": report_path.stat().st_size}
+    raise HTTPException(
+        status_code=410,
+        detail="文稿预览页已下线，报告 Markdown 为派生产物；请在 Info / Tracking 中编辑事实块。",
+    )
 
 
 @router.get("/{report_id}/attachments")
 async def list_attachments(report_id: str, user: dict = Depends(get_current_user)):
     """List attachments for a report."""
     _check_report_access(report_id, user)
-    paths = _get_report_paths(report_id)
-    att_dir = paths["attachments"]
-    files = []
-    if att_dir.exists():
-        for fp in sorted(att_dir.iterdir()):
-            if fp.is_file():
-                files.append({"filename": fp.name, "size": fp.stat().st_size})
+    files = _collect_attachments(report_id)
     return {"attachments": files}
 
 
@@ -1087,34 +1443,23 @@ async def download_attachment(report_id: str, filename: str, user: dict = Depend
 @router.delete("/{report_id}/attachments/{filename}")
 async def delete_attachment(report_id: str, filename: str, user: dict = Depends(get_current_user)):
     """Delete a specific attachment file."""
-    from db import get_db
-
     _check_report_access(report_id, user)
     paths = _get_report_paths(report_id)
     fp = paths["attachments"] / filename
     if not fp.exists():
         raise HTTPException(404, "Attachment not found")
     fp.unlink()
-    # Update metadata
+
+    # Refresh attachment metadata from disk and sync to JSON + DB.
+    refreshed_attachments = _collect_attachments(report_id)
+
     meta_path = paths["json"]
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        atts = meta.get("attachments", [])
-        meta["attachments"] = [a for a in atts if a.get("filename") != filename]
+        meta["attachments"] = refreshed_attachments
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # Update database
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE reports SET attachments = ?, updated_at = ? WHERE report_id = ?",
-                (json.dumps(meta["attachments"]), __import__("datetime").datetime.now().isoformat(), report_id)
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.error(f"Failed to update database for {report_id}: {e}")
+    _sync_attachments_db(report_id, refreshed_attachments)
 
     return {"status": "ok"}
 
@@ -1126,8 +1471,6 @@ async def upload_attachment(
     user: dict = Depends(get_current_user),
 ):
     """Upload attachments to an existing report."""
-    from db import get_db
-
     _check_report_access(report_id, user)
     paths = _get_report_paths(report_id)
     att_dir = paths["attachments"]
@@ -1143,34 +1486,148 @@ async def upload_attachment(
         dest = att_dir / f.filename
         dest.write_bytes(raw)
         uploaded.append({"filename": f.filename, "size": len(raw)})
-    # Update metadata
+
+    # Refresh attachment metadata from disk and sync to JSON + DB.
+    refreshed_attachments = _collect_attachments(report_id)
     meta_path = paths["json"]
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        existing = {a["filename"] for a in meta.get("attachments", [])}
-        atts = meta.get("attachments", [])
-        for u in uploaded:
-            if u["filename"] not in existing:
-                atts.append(u)
-            else:
-                atts = [a if a["filename"] != u["filename"] else u for a in atts]
-        meta["attachments"] = atts
+        meta["attachments"] = refreshed_attachments
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # Update database
-        try:
-            conn = get_db()
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE reports SET attachments = ?, updated_at = ? WHERE report_id = ?",
-                (json.dumps(atts), __import__("datetime").datetime.now().isoformat(), report_id)
-            )
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            log.error(f"Failed to update database for {report_id}: {e}")
+    _sync_attachments_db(report_id, refreshed_attachments)
 
     return {"uploaded": len(uploaded), "files": uploaded}
+
+
+@router.post("/{report_id}/attachments/update-report")
+async def update_report_from_attachments(
+    report_id: str,
+    body: AttachmentUpdateRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Create an attachment-driven update task without external research."""
+    from services.attachment_update_pipeline import run_attachment_update_pipeline
+    from services.intake_log_service import write_intake_log
+    from services.task_manager import TaskStatus, task_manager
+
+    _check_report_access(report_id, user)
+
+    normalized_filenames = []
+    for name in body.attachment_filenames or []:
+        safe_name = Path(name).name
+        if safe_name and safe_name not in normalized_filenames:
+            normalized_filenames.append(safe_name)
+    if not normalized_filenames:
+        raise HTTPException(400, "请选择至少一个附件参与更新")
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT report_id, bd_code, company_name FROM reports WHERE report_id = ?",
+            (report_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(404, "Report not found")
+
+    paths = _get_report_paths(report_id)
+    missing = [name for name in normalized_filenames if not (paths["attachments"] / name).exists()]
+    if missing:
+        raise HTTPException(404, f"附件不存在: {', '.join(missing)}")
+
+    settings = load_settings()
+    total_steps = 5 if (settings.get("fastgpt", {}) or {}).get("enabled") else 4
+    task_id = uuid.uuid4().hex[:12]
+    operator = user.get("username")
+    company_name = row["company_name"] or ""
+    bd_code = row["bd_code"]
+
+    await task_manager.create_intake_task(
+        task_id=task_id,
+        report_id=report_id,
+        owner=operator,
+        company_name=company_name,
+        bd_code=bd_code,
+        task_kind="attachment_update",
+        total_steps=total_steps,
+        message="附件已上传，等待更新",
+    )
+
+    async def _persist_progress(step: int, total: int, message: str) -> None:
+        current_step = max(0, min(step, total_steps))
+        await task_manager.update_task_status(
+            task_id,
+            TaskStatus.RUNNING,
+            current_step=current_step,
+            message=message,
+        )
+
+    async def _run():
+        try:
+            result = await run_attachment_update_pipeline(
+                report_id=report_id,
+                attachment_filenames=normalized_filenames,
+                settings=settings,
+                owner=operator,
+                user_note=body.note,
+                on_progress=_persist_progress,
+            )
+
+            await task_manager.update_task_status(
+                task_id,
+                TaskStatus.COMPLETED,
+                current_step=total_steps,
+                message="附件更新完成",
+            )
+
+            steps_executed = ["AttachmentUpdatePlanner"]
+            if result.get("updated_chunks"):
+                steps_executed.extend(["ChunkWriter", "RatingAgent"])
+            auto_push = result.get("auto_push", {}) or {}
+            if auto_push.get("status") in {"pushed", "skipped"}:
+                steps_executed.append("FastGPTPush")
+
+            trigger_reason = "首页附件上传后触发更新（不联网调研）"
+            if body.note and body.note.strip():
+                trigger_reason += f"；备注：{body.note.strip()}"
+
+            write_intake_log(
+                report_id=report_id,
+                log_type="attachment_update",
+                trigger_reason=trigger_reason,
+                input_sources=result.get("attachments_used", normalized_filenames),
+                changed_fields=result.get("backfilled_fields") or _build_attachment_update_log_fields(
+                    result.get("updated_chunks", []),
+                    result.get("attachments_used", normalized_filenames),
+                ),
+                steps_executed=steps_executed,
+                steps_skipped=result.get("steps_skipped", []),
+                research_data_age_days=None,
+                operator=operator,
+            )
+        except Exception as e:
+            log.exception("Attachment-driven report update failed for %s", report_id)
+            await task_manager.update_task_status(
+                task_id,
+                TaskStatus.FAILED,
+                current_step=0,
+                message=f"附件更新失败: {e}",
+                error_message=str(e),
+            )
+
+    asyncio.create_task(_run())
+
+    return {
+        "task_id": task_id,
+        "report_id": report_id,
+        "bd_code": bd_code,
+        "type": "attachment_update",
+        "pipeline": "attachment_update",
+        "auto_push_enabled": total_steps >= 5,
+    }
 
 
 @router.get("/{report_id}/download")
@@ -1178,23 +1635,30 @@ async def download_report(report_id: str):
     """Download the report as a .md file."""
     paths = _get_report_paths(report_id)
     report_path = paths["md"]
-    if not report_path.exists():
-        raise HTTPException(404, "Report not found")
-    # Try to get company name for filename
-    meta_path = paths["json"]
-    filename = f"尽调报告_{report_id}.md"
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            name = meta.get("company_name", "")
-            if name:
-                filename = f"尽调报告_{name}.md"
-        except Exception:
-            pass
-    return FileResponse(
-        path=str(report_path),
-        media_type="text/markdown",
-        filename=filename,
+    md_text = ""
+    company_name = report_id
+
+    if report_path.exists():
+        md_text = report_path.read_text(encoding="utf-8")
+        meta_path = paths["json"]
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                company_name = meta.get("company_name") or company_name
+            except Exception:
+                pass
+    else:
+        built = _build_v3_markdown(report_id)
+        if not built:
+            raise HTTPException(404, "Report not found")
+        company_name, md_text = built
+
+    filename = f"尽调报告_{company_name}.md"
+    encoded_filename = quote(filename)
+    return Response(
+        content=md_text.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
     )
 
 
@@ -1203,22 +1667,25 @@ async def download_report_pdf(report_id: str):
     """Download the report as a PDF file (converted from markdown)."""
     paths = _get_report_paths(report_id)
     report_path = paths["md"]
-    if not report_path.exists():
-        raise HTTPException(404, "Report not found")
+    md_text = ""
+    company_name = report_id
 
-    md_text = report_path.read_text(encoding="utf-8")
+    if report_path.exists():
+        md_text = report_path.read_text(encoding="utf-8")
+        meta_path = paths["json"]
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                company_name = meta.get("company_name") or company_name
+            except Exception:
+                pass
+    else:
+        built = _build_v3_markdown(report_id)
+        if not built:
+            raise HTTPException(404, "Report not found")
+        company_name, md_text = built
 
-    # Try to get company name for filename
-    meta_path = paths["json"]
-    filename = f"尽调报告_{report_id}.pdf"
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            name = meta.get("company_name", "")
-            if name:
-                filename = f"尽调报告_{name}.pdf"
-        except Exception:
-            pass
+    filename = f"尽调报告_{company_name}.pdf"
 
     pdf_path = paths["md"].parent / f"{report_id}.pdf"
     _md_to_pdf(md_text, pdf_path)
@@ -1399,45 +1866,98 @@ def _inline(text: str) -> str:
     return text
 
 
-# ── Version Management ────────────────────────────────────────────
+# ── Rating Management ─────────────────────────────────────────────
 
-@router.get("/{report_id}/versions")
-async def list_report_versions(report_id: str, user: dict = Depends(get_current_user)):
-    """List all versions for a report."""
-    _check_report_access(report_id, user)
-    from services.version_manager import list_versions
-    versions = list_versions(report_id)
-    return {"versions": versions, "count": len(versions)}
-
-
-@router.get("/{report_id}/versions/{version_id}")
-async def get_report_version(
+@router.post("/{report_id}/rating-confirm")
+async def confirm_rating_change(
     report_id: str,
-    version_id: str,
+    body: dict,
     user: dict = Depends(get_current_user)
 ):
-    """Get a specific version content."""
-    _check_report_access(report_id, user)
-    from services.version_manager import get_version
-    version = get_version(version_id)
-    if not version or version["report_id"] != report_id:
-        raise HTTPException(404, "Version not found")
-    return version
+    """Confirm or reject a pending rating change.
 
-
-@router.post("/{report_id}/versions/{version_id}/restore")
-async def restore_report_version(
-    report_id: str,
-    version_id: str,
-    user: dict = Depends(get_current_user)
-):
-    """Restore a report from a version."""
+    Body:
+        {
+            "action": "accept" | "reject",
+            "note": "optional user note"
+        }
+    """
     _check_report_access(report_id, user)
-    from services.version_manager import restore_version
+
+    action = body.get("action")
+    note = body.get("note", "")
+
+    if action not in ("accept", "reject"):
+        raise HTTPException(400, "action must be 'accept' or 'reject'")
+
+    conn = get_db()
     try:
-        restored_id = restore_version(version_id, restored_by=user["username"])
-        return {"status": "ok", "report_id": restored_id}
+        # Get current pending change
+        row = conn.execute(
+            "SELECT pending_rating_change FROM reports WHERE report_id = ?",
+            (report_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(404, "Report not found")
+
+        pending_json = row["pending_rating_change"]
+        if not pending_json:
+            raise HTTPException(400, "No pending rating change")
+
+        import json
+        pending = json.loads(pending_json)
+
+        if action == "accept":
+            # Apply the new rating
+            conn.execute(
+                """
+                UPDATE reports
+                SET feasibility_rating = ?,
+                    feasibility_rating_detail = ?,
+                    feasibility_rating_at = datetime('now','localtime'),
+                    pending_rating_change = NULL
+                WHERE report_id = ?
+                """,
+                (
+                    pending["rating"],
+                    json.dumps(pending, ensure_ascii=False),
+                    report_id,
+                )
+            )
+            conn.commit()
+            return {"status": "accepted", "new_rating": pending["rating"]}
+
+        else:  # reject
+            # Clear pending change, keep old rating
+            conn.execute(
+                "UPDATE reports SET pending_rating_change = NULL WHERE report_id = ?",
+                (report_id,)
+            )
+            conn.commit()
+            return {"status": "rejected"}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        log.exception(f"Failed to restore version {version_id}")
-        raise HTTPException(500, f"恢复失败: {e}")
+        log.exception(f"Failed to confirm rating change for {report_id}")
+        raise HTTPException(500, f"操作失败: {e}")
+    finally:
+        conn.close()
+
+
+@router.get("/{report_id}/chunks-legacy")
+@router.get("/{report_id}/chunks-v3")
+async def get_legacy_chunks(report_id: str, user: dict = Depends(get_current_user)):
+    """Get legacy chunk data from `report_chunks` for compatibility tooling."""
+    _check_report_access(report_id, user)
+
+    from utils.fastgpt_adapter import load_chunks_v3
+
+    try:
+        chunks = load_chunks_v3(report_id)
+        return {"chunks": chunks, "format": "v3"}
+    except Exception as e:
+        log.exception(f"Failed to load legacy chunks for {report_id}")
+        raise HTTPException(500, f"加载失败: {e}")
 

@@ -1,4 +1,4 @@
-"""Integration tests for Phase 3 features (task persistence + streaming)."""
+"""Integration tests for v3 task persistence + streaming behavior."""
 
 import pytest
 import asyncio
@@ -11,6 +11,29 @@ from services.task_manager import TaskManager, TaskStatus
 from services.sse_manager import SSEManager
 
 
+async def _create_v3_task(
+    manager: TaskManager,
+    task_id: str,
+    report_id: str,
+    *,
+    company_name: str = "Test Co",
+    owner: str | None = None,
+    bd_code: str = "BD00001",
+    task_kind: str = "v3_create",
+    total_steps: int = 4,
+) -> None:
+    await manager.create_v3_task(
+        task_id=task_id,
+        report_id=report_id,
+        owner=owner,
+        company_name=company_name,
+        bd_code=bd_code,
+        task_kind=task_kind,
+        total_steps=total_steps,
+        message="任务已创建，等待执行",
+    )
+
+
 @pytest.fixture
 def temp_db():
     """Create a temporary database for testing."""
@@ -19,9 +42,12 @@ def temp_db():
 
     with patch('services.task_manager.get_db') as mock_get_db:
         import sqlite3
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        mock_get_db.return_value = conn
+        def _open_conn():
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        mock_get_db.side_effect = _open_conn
 
         yield path, mock_get_db
 
@@ -33,18 +59,13 @@ def temp_db():
 
 @pytest.mark.asyncio
 async def test_task_with_streaming_progress(temp_db):
-    """Test task execution with streaming progress updates."""
+    """Test v3 task execution with streaming progress updates."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
 
     task_id = "streaming-task-1"
-    await task_manager.create_task(
-        task_id,
-        "report-1",
-        {"company_name": "Test Co"},
-        []
-    )
+    await _create_v3_task(task_manager, task_id, "report-1")
 
     # Subscribe to SSE events
     queue = sse_manager.subscribe(task_id)
@@ -76,13 +97,13 @@ async def test_task_with_streaming_progress(temp_db):
 
 @pytest.mark.asyncio
 async def test_task_failure_with_error_event(temp_db):
-    """Test that task failures send error events."""
+    """Test that v3 task failures send error events."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
 
     task_id = "failing-task"
-    await task_manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(task_manager, task_id, "report-1")
 
     queue = sse_manager.subscribe(task_id)
 
@@ -113,7 +134,7 @@ async def test_task_failure_with_error_event(temp_db):
 
 @pytest.mark.asyncio
 async def test_service_restart_recovery_with_streaming(temp_db):
-    """Test recovering tasks after service restart with streaming."""
+    """Test recovering persisted generic v3 tasks after service restart with streaming."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
@@ -159,7 +180,7 @@ async def test_service_restart_recovery_with_streaming(temp_db):
 
 @pytest.mark.asyncio
 async def test_concurrent_tasks_with_isolated_streams(temp_db):
-    """Test multiple concurrent tasks with isolated streaming."""
+    """Test multiple concurrent v3 tasks with isolated streaming."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
@@ -169,7 +190,7 @@ async def test_concurrent_tasks_with_isolated_streams(temp_db):
 
     # Create and subscribe to tasks
     for tid in task_ids:
-        await task_manager.create_task(tid, f"report-{tid}", {"name": tid}, [])
+        await _create_v3_task(task_manager, tid, f"report-{tid}", company_name=tid, bd_code="BD00001")
         queues[tid] = sse_manager.subscribe(tid)
 
     # Create tasks that send different progress
@@ -205,13 +226,13 @@ async def test_concurrent_tasks_with_isolated_streams(temp_db):
 
 @pytest.mark.asyncio
 async def test_streaming_interruption_recovery(temp_db):
-    """Test recovering from streaming connection interruption."""
+    """Test recovering from streaming connection interruption on a v3 task."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
 
     task_id = "interruption-test"
-    await task_manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(task_manager, task_id, "report-1")
 
     # First subscriber
     queue1 = sse_manager.subscribe(task_id)
@@ -244,13 +265,13 @@ async def test_streaming_interruption_recovery(temp_db):
 
 @pytest.mark.asyncio
 async def test_task_cancellation_with_cleanup(temp_db):
-    """Test that cancelled tasks clean up streaming resources."""
+    """Test that cancelled v3 tasks clean up streaming resources."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
 
     task_id = "cancel-test"
-    await task_manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(task_manager, task_id, "report-1")
 
     queue = sse_manager.subscribe(task_id)
 
@@ -279,7 +300,7 @@ async def test_task_cancellation_with_cleanup(temp_db):
 
 @pytest.mark.asyncio
 async def test_full_pipeline_with_persistence_and_streaming(temp_db):
-    """Test complete pipeline flow with both persistence and streaming."""
+    """Test complete v3 pipeline flow with both persistence and streaming."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
@@ -287,13 +308,7 @@ async def test_full_pipeline_with_persistence_and_streaming(temp_db):
     task_id = "full-pipeline"
     report_id = "report-full"
 
-    await task_manager.create_task(
-        task_id,
-        report_id,
-        {"company_name": "Full Test Co"},
-        [("doc.pdf", "content")],
-        owner="user1"
-    )
+    await _create_v3_task(task_manager, task_id, report_id, owner="user1", company_name="Full Test Co")
 
     queue = sse_manager.subscribe(task_id)
 
@@ -315,7 +330,11 @@ async def test_full_pipeline_with_persistence_and_streaming(temp_db):
         await sse_manager.send_complete(task_id, report_id)
 
     await task_manager.start_task(task_id, full_pipeline)
-    await asyncio.sleep(0.2)
+    for _ in range(20):
+        task = await task_manager.get_task(task_id)
+        if task["status"] == TaskStatus.COMPLETED:
+            break
+        await asyncio.sleep(0.05)
 
     # Collect all events
     events = []
@@ -336,13 +355,13 @@ async def test_full_pipeline_with_persistence_and_streaming(temp_db):
 
 @pytest.mark.asyncio
 async def test_error_propagation_through_streaming(temp_db):
-    """Test that errors are properly propagated through streaming."""
+    """Test that v3 task errors are properly propagated through streaming."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
 
     task_id = "error-propagation"
-    await task_manager.create_task(task_id, "report-1", {"name": "Test"}, [])
+    await _create_v3_task(task_manager, task_id, "report-1")
 
     queue = sse_manager.subscribe(task_id)
 
@@ -379,7 +398,7 @@ async def test_error_propagation_through_streaming(temp_db):
 
 @pytest.mark.asyncio
 async def test_performance_under_load(temp_db):
-    """Test system performance with many concurrent tasks and streams."""
+    """Test system performance with many concurrent v3 tasks and streams."""
     _, mock_get_db = temp_db
     task_manager = TaskManager()
     sse_manager = SSEManager()
@@ -389,7 +408,7 @@ async def test_performance_under_load(temp_db):
 
     # Create all tasks
     for tid in task_ids:
-        await task_manager.create_task(tid, f"report-{tid}", {"name": tid}, [])
+        await _create_v3_task(task_manager, tid, f"report-{tid}", company_name=tid)
 
     # Subscribe to all
     queues = {tid: sse_manager.subscribe(tid) for tid in task_ids}

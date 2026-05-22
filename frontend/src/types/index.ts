@@ -19,35 +19,16 @@ export interface StepConfig {
 }
 
 export interface AISettings {
-  extractor: StepConfig;
   researcher: StepConfig;
-  writer: StepConfig;
-  field_extractor: StepConfig;
-  chunker: StepConfig;
+  matcher_agent?: StepConfig;
+  writer_agent?: StepConfig;
+  tracking_processor?: StepConfig;
+  info_chunk_writer?: StepConfig;
+  index_builder?: StepConfig;
+  attachment_update_planner?: StepConfig;
+  rating_agent?: StepConfig;
+  intake_agent?: IntakeAgentConfig;
   fastgpt?: FastGPTConfig;
-}
-
-export interface UploadResponse {
-  session_id: string;
-  company_count: number;
-  companies: Company[];
-}
-
-export interface ManualInputResponse {
-  session_id: string;
-  bd_code: string;
-  company_name: string;
-  project_name: string;
-}
-
-export interface FieldDef {
-  key: string;
-  label: string;
-  required: boolean;
-}
-
-export interface GenerateResponse {
-  task_id: string;
 }
 
 export interface ProgressEvent {
@@ -86,6 +67,8 @@ export interface ReportMeta {
   net_profit_yuan?: string | null;
   valuation_yuan?: string | null;
   valuation_date?: string | null;
+  offer_yuan?: string | null;
+  offer_date?: string | null;
   website?: string | null;
   description?: string | null;
   company_intro?: string | null;
@@ -99,8 +82,13 @@ export interface ReportMeta {
   rating: string | null;
   manual_rating?: string | null;
   manual_rating_note?: string | null;
+  feasibility_rating?: string | null;
+  feasibility_rating_detail?: string | null;
+  feasibility_rating_at?: string | null;
+  pending_rating_change?: string | null;
   status: string;
   created_at: string;
+  updated_at?: string;
   file_size: number;
   attachments?: AttachmentInfo[];
   push_status?: PushStatus;
@@ -128,6 +116,10 @@ export interface ReportChunk {
   title: string;
   q: string;
   indexes: ChunkIndex[];
+  chunk_id?: string;
+  chunk_kind?: "info" | "tracking";
+  summary?: string;
+  content?: string;
 }
 
 export interface FastGPTConfig {
@@ -187,8 +179,10 @@ export interface ToolsConfig {
 // ── Intake Agent types ────────────────────────────────────────
 
 export interface IntakeChangedField {
-  old: string | null;
-  new: string;
+  old: string | number | null;
+  new: string | number | null;
+  source_chunk?: string;
+  source_label?: string;
 }
 
 export interface IntakeOperation {
@@ -198,6 +192,26 @@ export interface IntakeOperation {
   fields?: Record<string, string>;            // for create
   changed_fields?: Record<string, IntakeChangedField>;  // for update
   source: string[];
+  material_summary?: string;
+  related_attachments?: string[];
+  related_attachment_paths?: Record<string, string>;
+  available_attachments?: string[];
+  available_attachment_paths?: Record<string, string>;
+  match_confidence?: "high" | "medium" | "low" | null;
+  match_reason?: string | null;
+}
+
+export interface IntakeConfirmationItem {
+  project_name: string;
+  action: "create" | "update";
+  matched_report_id?: string | null;
+  matched_company_name?: string | null;
+  match_confidence?: "high" | "medium" | "low" | null;
+  match_reason?: string | null;
+  material_summary?: string;
+  related_attachments?: string[];
+  needs_user_attention?: boolean;
+  attention_reason?: string;
 }
 
 export interface IntakeParseResult {
@@ -205,17 +219,31 @@ export interface IntakeParseResult {
   summary: string;
   mode: string;
   input_sources: string[];
+  confirmation_items?: IntakeConfirmationItem[];
+  targets?: Array<Record<string, any>>;
+  matcher_result?: Array<Record<string, any>>;
   raw_content_summary?: string;
+}
+
+export interface IntakeParseStatus {
+  parse_job_id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  stage: string;
+  message: string;
+  progress: number;
+  result: IntakeParseResult | null;
+  error: string | null;
 }
 
 export interface IntakeExecuteResult {
   task_id: string;
   report_id?: string;
   bd_code?: string;
-  type: "create" | "light_update" | "full_regenerate";
+  type: "create" | "update" | "attachment_update" | "light_update" | "full_regenerate";
   needs_research_prompt?: boolean;
   research_age_days?: number | null;
   research_expired?: boolean;
+  auto_push_enabled?: boolean;
 }
 
 // In-memory intake task status from backend
@@ -224,17 +252,19 @@ export interface IntakeTaskStatus {
   report_id?: string;
   bd_code?: string;
   company_name: string;
-  op_type: "create" | "light_update" | "full_regenerate";
-  status: "queued" | "running" | "completed" | "cancelling" | "cancelled" | "failed";
+  op_type: "create" | "update" | "light_update" | "full_regenerate";
+  status: "pending" | "queued" | "running" | "completed" | "cancelling" | "cancelled" | "failed";
   step: number;
   total_steps: number;
   queue_position?: number;
+  message?: string;
+  error_message?: string | null;
 }
 
 export interface IntakeLog {
   id: number;
   report_id: string;
-  log_type: "create" | "light_update" | "full_regenerate";
+  log_type: "create" | "update" | "attachment_update" | "light_update" | "full_regenerate";
   trigger_reason: string | null;
   input_sources: string[];
   changed_fields: Record<string, IntakeChangedField>;
@@ -253,4 +283,92 @@ export interface IntakeAgentConfig {
   default_mode: "auto" | "manual";
   core_fields_trigger_research: string[];
   research_data_expire_days: number;
+}
+
+export interface ModelPromptView {
+  id: string;
+  default: string;
+  current: string;
+  overridden: boolean;
+  label?: string;
+}
+
+export interface ModelConfigSourceView {
+  mode: "custom" | "inherited" | "system_default";
+  label: string;
+  source_node?: string | null;
+}
+
+export interface ModelProviderFieldView {
+  key: "base_url" | "api_key" | "model";
+  label: string;
+  input_type: "text" | "password";
+  value: string;
+  default_value?: string;
+  editable: boolean;
+  is_secret?: boolean;
+  configured?: boolean;
+  display_value?: string;
+  status_text?: string;
+  source: ModelConfigSourceView;
+}
+
+export interface ModelProviderView {
+  fields: ModelProviderFieldView[];
+  summary: {
+    model: string;
+    base_url: string;
+    api_key_configured: boolean;
+  };
+}
+
+export interface ModelBehaviorFieldOption {
+  label: string;
+  value: string;
+}
+
+export interface ModelBehaviorFieldView {
+  key: string;
+  label: string;
+  input_type: "text" | "number" | "select" | "tags";
+  description?: string;
+  options?: ModelBehaviorFieldOption[];
+  value: any;
+  default_value?: any;
+  editable: boolean;
+  source: ModelConfigSourceView;
+}
+
+export interface ModelBehaviorView {
+  fields: ModelBehaviorFieldView[];
+}
+
+export interface ModelNodeView {
+  id: string;
+  label: string;
+  group: string;
+  stage: string;
+  description: string;
+  runtime_file: string;
+  prompt_file: string;
+  is_primary: boolean;
+  config_key?: string;
+  config_mode: "custom" | "inherited" | "prompt_only";
+  node_kind: "model" | "model_with_behavior" | "prompt_only";
+  inherits_from?: string;
+  source_badge?: string;
+  can_customize?: boolean;
+  can_reset?: boolean;
+  reset_label?: string;
+  prompt_override_count?: number;
+  provider?: ModelProviderView;
+  behavior?: ModelBehaviorView;
+  prompt?: ModelPromptView;
+  prompt_variants?: ModelPromptView[];
+}
+
+export interface ModelWorkbenchResponse {
+  nodes: ModelNodeView[];
+  ai_config: Record<string, any>;
+  prompt_overrides: Record<string, string>;
 }

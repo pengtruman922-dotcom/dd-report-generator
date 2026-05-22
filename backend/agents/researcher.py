@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
+import re
 from typing import Any, Callable
 
 from agents.base_agent import create_client
 from prompts.researcher_prompt import SYSTEM_PROMPT, build_researcher_prompt
 from config import MAX_TOOL_ITERATIONS, RESEARCH_ITERATIONS, DEFAULT_TOOLS_CONFIG, SEARCH_QUALITY_THRESHOLD, MIN_SEARCH_RESULTS
+from services.prompt_manager import get_prompt
 from tools import registry
 from tools.base import ToolProvider
 from tools.fallback import FallbackToolProvider
@@ -104,6 +106,26 @@ def _is_company_listed(company_profile: dict[str, Any] | None) -> bool | None:
     return None
 
 
+def _extract_query_keywords(query: str) -> set[str]:
+    """Extract keywords for both whitespace-delimited and Chinese queries."""
+    raw_tokens = {token.strip().lower() for token in query.split() if token.strip()}
+    stop_words = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个"}
+    keywords = {token for token in raw_tokens if token not in stop_words}
+
+    chinese_parts = re.findall(r"[\u4e00-\u9fff]{2,}", query)
+    for part in chinese_parts:
+        lowered = part.lower()
+        if lowered not in stop_words:
+            keywords.add(lowered)
+        if len(lowered) >= 4:
+            for i in range(len(lowered) - 1):
+                piece = lowered[i:i + 2]
+                if piece not in stop_words:
+                    keywords.add(piece)
+
+    return keywords
+
+
 def _assess_search_quality(results: Any, query: str) -> float:
     """Assess the quality of search results.
 
@@ -134,10 +156,7 @@ def _assess_search_quality(results: Any, query: str) -> float:
     count_score = min(result_count / 10.0, 1.0)  # Max score at 10+ results
 
     # Relevance score: check if query keywords appear in titles/snippets
-    query_keywords = set(query.lower().split())
-    # Remove common Chinese stop words
-    stop_words = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个"}
-    query_keywords = query_keywords - stop_words
+    query_keywords = _extract_query_keywords(query)
 
     if not query_keywords:
         relevance_score = 0.5  # Neutral if no meaningful keywords
@@ -255,13 +274,20 @@ def _build_active_tools(
     tool_defs.append(func_def)
     executors[fn_name] = scraper_instance
 
-    # Datasource providers (multiple active, filtered by company type)
+    # Datasource providers (multiple active, filtered by company type and config validation)
     ds_cfg = tools_config.get("datasource", {})
     active_ds = ds_cfg.get("active_providers", [])
     ds_configs = ds_cfg.get("providers", {})
     for ds_id in active_ds:
         try:
             ds_instance = registry.create_instance(ds_id, ds_configs.get(ds_id, {}))
+
+            # Validate config (check for missing API keys, etc.)
+            config_errors = ds_instance.validate_config()
+            if config_errors:
+                log.warning("Skipping datasource %s due to config errors: %s", ds_id, config_errors)
+                continue
+
             # Filter by target_company_type
             target = ds_instance.target_company_type
             if target == "listed" and is_listed is False:
@@ -270,6 +296,7 @@ def _build_active_tools(
             if target == "unlisted" and is_listed is True:
                 log.info("Skipping datasource %s (unlisted-only, company is listed)", ds_id)
                 continue
+
             func_def = ds_instance.openai_function_def()
             fn_name = func_def.get("function", {}).get("name", ds_id)
             tool_defs.append(func_def)
@@ -318,13 +345,14 @@ async def research(
         log.info(f"Using {max_iterations} iterations (company type unknown)")
 
     # Build dynamic tools from config (filtered by company type)
+    base_prompt = get_prompt("researcher", SYSTEM_PROMPT)
     try:
         tool_defs, executors = _build_active_tools(tools_config, company_profile)
-        system_prompt = build_researcher_prompt(tool_defs)
+        system_prompt = build_researcher_prompt(tool_defs, base_prompt=base_prompt)
     except Exception as e:
         log.warning("Failed to build dynamic tools (%s), falling back to defaults", e)
         tool_defs, executors = _build_active_tools(DEFAULT_TOOLS_CONFIG)
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = base_prompt
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -375,7 +403,7 @@ async def research(
             fn_args = json.loads(tc.function.arguments)
 
             if on_progress:
-                await _maybe_await(on_progress, f"🔍 [{iteration+1}] {fn_name}: {_summarise_args(fn_name, fn_args)}")
+                await _maybe_await(on_progress, f"[{iteration+1}] {fn_name}: {_summarise_args(fn_name, fn_args)}")
 
             try:
                 executor = executors.get(fn_name)
@@ -399,7 +427,7 @@ async def research(
     # ── Produce final output ──────────────────────────────────────────
     if content_filter_hit:
         if on_progress:
-            await _maybe_await(on_progress, "⚠️ 内容审查触发，使用已收集的信息生成结果...")
+            await _maybe_await(on_progress, "[Warning] 内容审查触发，使用已收集的信息生成结果...")
         messages = _trim_last_tool_batch(messages)
         messages.append({
             "role": "user",

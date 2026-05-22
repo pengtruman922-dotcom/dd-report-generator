@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProgressEvent, CompleteEvent, ErrorEvent } from "../types";
 
 interface SSEState {
@@ -58,15 +58,17 @@ export function useSSE(taskId: string | null) {
           done: true,
           logs: [...prev.logs, `错误: ${data.error}`],
         }));
+        es.close();
       } catch {
-        // connection error
+        // Connection loss/timeout: keep task alive and rely on intake task polling.
+        // Do not mark done here, otherwise long-running intake tasks appear "suddenly completed".
         setState((prev) => ({
           ...prev,
-          error: "SSE connection lost",
-          done: true,
+          logs: prev.logs.includes("SSE连接中断，已切换到轮询状态")
+            ? prev.logs
+            : [...prev.logs, "SSE连接中断，已切换到轮询状态"],
         }));
       }
-      es.close();
     });
 
     return () => {

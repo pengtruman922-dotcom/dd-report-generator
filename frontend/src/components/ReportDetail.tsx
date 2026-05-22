@@ -1,31 +1,52 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { getReport, getDownloadUrl, getPdfDownloadUrl, getChunks } from "../api/client";
-import ReportViewer from "./ReportViewer";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { getDownloadUrl, getPdfDownloadUrl, getChunks } from "../api/client";
 import ChunkEditor from "./ChunkEditor";
-import VersionHistory from "./VersionHistory";
 import IntakeLogs from "./IntakeLogs";
+import AttachmentsTab from "./AttachmentsTab";
 
-type Tab = "report" | "chunks" | "versions" | "intake_logs";
+type Tab = "chunks" | "intake_logs" | "attachments";
 
 export default function ReportDetail() {
   const { reportId } = useParams<{ reportId: string }>();
   const navigate = useNavigate();
-  const [content, setContent] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("report");
+  const [tab, setTab] = useState<Tab>(() => {
+    const requestedTab = searchParams.get("tab");
+    return requestedTab === "chunks" || requestedTab === "intake_logs" || requestedTab === "attachments"
+      ? requestedTab
+      : "chunks";
+  });
   const [hasChunks, setHasChunks] = useState(false);
+  const focusChunkId = searchParams.get("chunk") || undefined;
+
+  useEffect(() => {
+    const requestedTab = searchParams.get("tab");
+    if (requestedTab === "chunks" || requestedTab === "intake_logs" || requestedTab === "attachments") {
+      setTab(requestedTab);
+    } else if (requestedTab === "report") {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set("tab", "chunks");
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
+  const handleTabChange = (nextTab: Tab) => {
+    setTab(nextTab);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", nextTab);
+    if (nextTab !== "chunks") nextParams.delete("chunk");
+    setSearchParams(nextParams, { replace: true });
+  };
 
   useEffect(() => {
     if (!reportId) return;
     setLoading(true);
-    Promise.all([
-      getReport(reportId),
-      getChunks(reportId).then((c) => c.length > 0).catch(() => false),
-    ])
-      .then(([data, chunksExist]) => {
-        setContent(data.content);
+    getChunks(reportId)
+      .then((chunks) => {
+        const chunksExist = chunks.length > 0;
         setHasChunks(chunksExist);
         setLoading(false);
       })
@@ -35,23 +56,6 @@ export default function ReportDetail() {
       });
   }, [reportId]);
 
-  const handleCopy = () => {
-    if (content) navigator.clipboard.writeText(content);
-  };
-
-  const handleContentUpdate = (newContent: string) => {
-    setContent(newContent);
-  };
-
-  const handleVersionRestore = () => {
-    // Reload report content after version restore
-    if (reportId) {
-      getReport(reportId)
-        .then((data) => setContent(data.content))
-        .catch((e) => alert("重新加载失败: " + e.message));
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20 text-gray-400">
@@ -60,10 +64,10 @@ export default function ReportDetail() {
     );
   }
 
-  if (error || !content) {
+  if (error) {
     return (
       <div className="bg-red-50 text-red-700 p-4 rounded-lg">
-        加载失败: {error || "报告不存在"}
+        加载失败: {error}
         <button onClick={() => navigate("/reports")} className="ml-3 underline">
           返回列表
         </button>
@@ -98,52 +102,26 @@ export default function ReportDetail() {
           >
             下载 PDF
           </a>
-          <button
-            onClick={handleCopy}
-            className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300"
-          >
-            复制内容
-          </button>
         </div>
       </div>
 
       {/* Tabs */}
       <div className="flex gap-1 mb-4 border-b">
         <button
-          onClick={() => setTab("report")}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-            tab === "report"
-              ? "border-blue-600 text-blue-600"
-              : "border-transparent text-gray-500 hover:text-gray-700"
-          }`}
-        >
-          报告内容
-        </button>
-        <button
-          onClick={() => { setTab("chunks"); setHasChunks(true); }}
+          onClick={() => { handleTabChange("chunks"); setHasChunks(true); }}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
             tab === "chunks"
               ? "border-blue-600 text-blue-600"
               : "border-transparent text-gray-500 hover:text-gray-700"
           }`}
         >
-          Chunks & 索引
+          Info / Tracking
           {hasChunks && (
             <span className="ml-1.5 inline-block w-2 h-2 bg-green-400 rounded-full" />
           )}
         </button>
         <button
-          onClick={() => setTab("versions")}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-            tab === "versions"
-              ? "border-blue-600 text-blue-600"
-              : "border-transparent text-gray-500 hover:text-gray-700"
-          }`}
-        >
-          版本历史
-        </button>
-        <button
-          onClick={() => setTab("intake_logs")}
+          onClick={() => handleTabChange("intake_logs")}
           className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
             tab === "intake_logs"
               ? "border-blue-600 text-blue-600"
@@ -152,20 +130,21 @@ export default function ReportDetail() {
         >
           更新记录
         </button>
+        <button
+          onClick={() => handleTabChange("attachments")}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
+            tab === "attachments"
+              ? "border-blue-600 text-blue-600"
+              : "border-transparent text-gray-500 hover:text-gray-700"
+          }`}
+        >
+          附件
+        </button>
       </div>
 
-      {tab === "report" && (
-        <ReportViewer
-          content={content}
-          reportId={reportId}
-          onContentUpdate={handleContentUpdate}
-        />
-      )}
-      {tab === "chunks" && <ChunkEditor reportId={reportId!} />}
-      {tab === "versions" && (
-        <VersionHistory reportId={reportId!} onRestore={handleVersionRestore} />
-      )}
+      {tab === "chunks" && <ChunkEditor reportId={reportId!} initialChunkId={focusChunkId} />}
       {tab === "intake_logs" && <IntakeLogs reportId={reportId!} />}
+      {tab === "attachments" && <AttachmentsTab reportId={reportId!} />}
     </div>
   );
 }

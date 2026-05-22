@@ -1,10 +1,15 @@
-"""AkShare 数据源 — 查询上市公司财务数据、行情等（免费，无需API Key）."""
+"""AkShare 数据源 — 查询上市公司历史行情数据（免费，无需API Key）.
+
+注意：AkShare 依赖第三方网站接口，数据源不稳定，部分功能可能失效。
+当前仅提供历史行情查询功能。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from typing import Any
+from datetime import datetime, timedelta
 
 from tools.base import ToolProvider
 from tools.registry import register
@@ -12,94 +17,72 @@ from tools.registry import register
 log = logging.getLogger(__name__)
 
 
-def _run_sync(fn, *args):
-    """Run a sync function in a thread executor."""
+def _run_sync(fn, *args, timeout=30):
+    """Run a sync function in a thread executor with timeout."""
     import asyncio
     loop = asyncio.get_event_loop()
-    return loop.run_in_executor(None, fn, *args)
+    return asyncio.wait_for(
+        loop.run_in_executor(None, fn, *args),
+        timeout=timeout
+    )
 
 
-def _query_financial(stock_code: str, report_type: str, max_results: int) -> list[dict]:
-    """Query financial data via akshare (runs in thread)."""
+def _query_stock_hist(stock_code: str, days: int = 90) -> list[dict]:
+    """Query historical stock price data via akshare (runs in thread)."""
     try:
         import akshare as ak
         import pandas as pd
     except ImportError:
         return [{"error": "akshare 未安装，请运行 pip install akshare"}]
 
-    results = []
     code = stock_code.strip()
 
+    # Calculate date range
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+
     try:
-        if report_type in ("利润表", "income"):
-            df = ak.stock_profit_sheet_by_report_em(symbol=code)
-            if df is not None and not df.empty:
-                for _, row in df.head(max_results).iterrows():
-                    results.append({
-                        "报告期": str(row.get("REPORT_DATE_NAME", "")),
-                        "营业总收入": str(row.get("TOTAL_OPERATE_INCOME", "")),
-                        "营业总成本": str(row.get("TOTAL_OPERATE_COST", "")),
-                        "净利润": str(row.get("NETPROFIT", "")),
-                    })
-        elif report_type in ("资产负债表", "balance"):
-            df = ak.stock_balance_sheet_by_report_em(symbol=code)
-            if df is not None and not df.empty:
-                for _, row in df.head(max_results).iterrows():
-                    results.append({
-                        "报告期": str(row.get("REPORT_DATE_NAME", "")),
-                        "总资产": str(row.get("TOTAL_ASSETS", "")),
-                        "总负债": str(row.get("TOTAL_LIABILITIES", "")),
-                        "净资产": str(row.get("TOTAL_EQUITY", "")),
-                    })
-        elif report_type in ("现金流量表", "cashflow"):
-            df = ak.stock_cash_flow_sheet_by_report_em(symbol=code)
-            if df is not None and not df.empty:
-                for _, row in df.head(max_results).iterrows():
-                    results.append({
-                        "报告期": str(row.get("REPORT_DATE_NAME", "")),
-                        "经营活动现金流": str(row.get("NETCASH_OPERATE", "")),
-                        "投资活动现金流": str(row.get("NETCASH_INVEST", "")),
-                        "筹资活动现金流": str(row.get("NETCASH_FINANCE", "")),
-                    })
-        else:
-            # Default: key financial indicators
-            df = ak.stock_financial_abstract_ths(symbol=code)
-            if df is not None and not df.empty:
-                for _, row in df.head(max_results).iterrows():
-                    results.append(row.to_dict())
+        df = ak.stock_zh_a_hist(
+            symbol=code,
+            period='daily',
+            start_date=start_date.strftime('%Y%m%d'),
+            end_date=end_date.strftime('%Y%m%d'),
+            adjust=''
+        )
+
+        if df is None or df.empty:
+            return [{"error": "未查询到数据"}]
+
+        # Return recent records (newest first)
+        results = []
+        for _, row in df.tail(min(30, len(df))).iterrows():
+            results.append({
+                "日期": str(row.get("日期", "")),
+                "股票代码": str(row.get("股票代码", code)),
+                "开盘": float(row.get("开盘", 0)) if pd.notna(row.get("开盘")) else None,
+                "收盘": float(row.get("收盘", 0)) if pd.notna(row.get("收盘")) else None,
+                "最高": float(row.get("最高", 0)) if pd.notna(row.get("最高")) else None,
+                "最低": float(row.get("最低", 0)) if pd.notna(row.get("最低")) else None,
+                "成交量": int(row.get("成交量", 0)) if pd.notna(row.get("成交量")) else None,
+                "成交额": float(row.get("成交额", 0)) if pd.notna(row.get("成交额")) else None,
+                "涨跌幅": float(row.get("涨跌幅", 0)) if pd.notna(row.get("涨跌幅")) else None,
+            })
+
+        # Reverse to newest first
+        results.reverse()
+        return results
+
     except Exception as e:
-        log.warning("akshare query failed for %s/%s: %s", code, report_type, e)
-        results.append({"error": f"查询失败: {e}"})
-
-    return results
-
-
-def _query_stock_info(stock_code: str) -> dict:
-    """Query basic stock info via akshare."""
-    try:
-        import akshare as ak
-    except ImportError:
-        return {"error": "akshare 未安装"}
-
-    try:
-        df = ak.stock_individual_info_em(symbol=stock_code.strip())
-        if df is not None and not df.empty:
-            info = {}
-            for _, row in df.iterrows():
-                info[str(row.iloc[0])] = str(row.iloc[1])
-            return info
-    except Exception as e:
-        log.warning("akshare stock_info failed for %s: %s", stock_code, e)
-        return {"error": str(e)}
-    return {}
+        log.warning("akshare stock_zh_a_hist failed for %s: %s", code, e)
+        return [{"error": f"查询失败: {e}"}]
 
 
 @register
 class AkShareProvider(ToolProvider):
     tool_type = "datasource"
     provider_id = "akshare"
-    display_name = "AkShare 财务数据"
-    description = "查询A股上市公司财务报表、个股信息等，免费无需API Key"
+    display_name = "AkShare 行情数据"
+    description = "查询A股上市公司历史行情数据（股价、成交量等），免费无需API Key。注意：数据源不稳定，可能失败。"
     target_company_type = "listed"
 
     @classmethod
@@ -112,9 +95,9 @@ class AkShareProvider(ToolProvider):
             "function": {
                 "name": "akshare_query",
                 "description": (
-                    "Query financial data of Chinese A-share listed companies via AkShare. "
-                    "Can retrieve income statements, balance sheets, cash flow statements, "
-                    "and basic stock information. Free, no API key needed."
+                    "Query historical stock price data of Chinese A-share listed companies via AkShare. "
+                    "Returns daily OHLC (open/high/low/close) prices, volume, and turnover. "
+                    "Free, no API key needed. Note: Data source may be unstable."
                 ),
                 "parameters": {
                     "type": "object",
@@ -123,18 +106,10 @@ class AkShareProvider(ToolProvider):
                             "type": "string",
                             "description": "Stock code, e.g. '000001' or '600519'.",
                         },
-                        "query_type": {
-                            "type": "string",
-                            "description": (
-                                "Type of query: '利润表' (income statement), "
-                                "'资产负债表' (balance sheet), '现金流量表' (cash flow), "
-                                "'个股信息' (stock info). Default: '利润表'."
-                            ),
-                        },
-                        "max_results": {
+                        "days": {
                             "type": "integer",
-                            "description": "Max rows to return (default 4, i.e. recent 4 periods).",
-                            "default": 4,
+                            "description": "Number of days to look back (default 90, returns up to 30 most recent records).",
+                            "default": 90,
                         },
                     },
                     "required": ["stock_code"],
@@ -144,9 +119,13 @@ class AkShareProvider(ToolProvider):
 
     async def execute(self, args: dict[str, Any]) -> Any:
         stock_code = args["stock_code"]
-        query_type = args.get("query_type", "利润表")
-        max_results = args.get("max_results", 4)
+        days = args.get("days", 90)
 
-        if query_type in ("个股信息", "stock_info"):
-            return await _run_sync(_query_stock_info, stock_code)
-        return await _run_sync(_query_financial, stock_code, query_type, max_results)
+        try:
+            return await _run_sync(_query_stock_hist, stock_code, days, timeout=20)
+        except asyncio.TimeoutError:
+            log.warning("akshare query timeout for %s", stock_code)
+            return [{"error": "查询超时（20秒），数据源可能不可用"}]
+        except Exception as e:
+            log.warning("akshare query failed for %s: %s", stock_code, e)
+            return [{"error": f"查询失败: {e}"}]

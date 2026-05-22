@@ -21,7 +21,7 @@ class GSXTScraper(ToolProvider):
     tool_type = "datasource"
     provider_id = "gsxt"
     display_name = "国家企业信用信息公示系统"
-    description = "免费查询企业工商注册信息（注册资本、成立日期、法人、经营范围等）"
+    description = "【当前不可用】查询企业工商登记信息。需要验证码破解和JS渲染，建议使用天眼查替代。"
     target_company_type = "all"  # Works for all companies
 
     @classmethod

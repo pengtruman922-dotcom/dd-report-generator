@@ -16,6 +16,7 @@ import { useAuth } from "../contexts/AuthContext";
 import BatchPushModal from "./BatchPushModal";
 import EditReportModal from "./EditReportModal";
 import AttachmentPopover from "./AttachmentPopover";
+import RatingConfirmModal from "./RatingConfirmModal";
 
 /* ── Column definitions ────────────────────────────────────────── */
 
@@ -28,30 +29,18 @@ interface ColumnDef {
   render?: (val: any, row: ReportMeta) => React.ReactNode;
 }
 
-function scoreColor(score: number | null): string {
-  if (score === null) return "text-gray-400";
-  if (score >= 8.0) return "text-green-700 bg-green-50";
-  if (score >= 6.5) return "text-green-600 bg-green-50";
-  if (score >= 5.0) return "text-yellow-600 bg-yellow-50";
-  if (score >= 3.5) return "text-orange-600 bg-orange-50";
-  return "text-red-600 bg-red-50";
-}
+type SuggestionSource = "项目名" | "行业" | "标签";
+type SearchSuggestionItem = { value: string; source: SuggestionSource };
 
-function ratingBadge(rating: string | null): string {
-  if (!rating) return "bg-gray-100 text-gray-500";
-  if (rating === "强烈推荐" || rating === "推荐") return "bg-green-100 text-green-700";
-  if (rating === "谨慎推荐") return "bg-yellow-100 text-yellow-700";
-  if (rating === "不推荐") return "bg-orange-100 text-orange-700";
-  return "bg-red-100 text-red-700";
-}
+/* ── Helper functions ───────────────────────────────────────── */
 
-function stars(score: number | null): string {
-  if (score === null) return "--";
-  if (score >= 8.0) return "\u2B50\u2B50\u2B50\u2B50\u2B50";
-  if (score >= 6.5) return "\u2B50\u2B50\u2B50\u2B50";
-  if (score >= 5.0) return "\u2B50\u2B50\u2B50";
-  if (score >= 3.5) return "\u2B50\u2B50";
-  return "\u2B50";
+function formatMoney(val: string | number | null | undefined): string {
+  if (val === null || val === undefined || val === "") return "--";
+  const num = typeof val === "string" ? parseFloat(val) : val;
+  if (isNaN(num)) return "--";
+  if (num >= 1e8) return `${(num / 1e8).toFixed(2)}亿`;
+  if (num >= 1e4) return `${(num / 1e4).toFixed(0)}万`;
+  return `${num}`;
 }
 
 function formatDate(iso: string): string {
@@ -59,25 +48,69 @@ function formatDate(iso: string): string {
   return iso.slice(0, 10);
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+function formatMonth(iso: string | null | undefined): string {
+  if (!iso) return "--";
+  return iso.slice(0, 7);
 }
 
-/** Get final rating: manual_rating if set, otherwise AI rating */
-function getFinalRating(row: ReportMeta): string | null {
-  return row.manual_rating || row.rating;
+function hasMeaningfulAmount(val: string | number | null | undefined): boolean {
+  if (val === null || val === undefined) return false;
+  const raw = String(val).trim();
+  if (!raw) return false;
+  const num = Number(raw);
+  if (!Number.isNaN(num)) return num !== 0;
+  return raw !== "0";
+}
+
+function ratingColor(r: string | null | undefined): string {
+  if (!r) return "bg-gray-100 text-gray-500 border-gray-300";
+  const map: Record<string, string> = {
+    A: "bg-green-100 text-green-700 border-green-300",
+    B: "bg-blue-100 text-blue-700 border-blue-300",
+    C: "bg-yellow-100 text-yellow-700 border-yellow-300",
+    D: "bg-orange-100 text-orange-700 border-orange-300",
+    E: "bg-red-100 text-red-700 border-red-300",
+  };
+  return map[r] || "bg-gray-100 text-gray-500 border-gray-300";
+}
+
+/** Get offer first, then valuation, then null */
+function getOfferOrValuation(row: ReportMeta): { value: string; isEstimate: boolean } | null {
+  if (hasMeaningfulAmount(row.offer_yuan)) {
+    return { value: String(row.offer_yuan), isEstimate: false };
+  }
+  if (hasMeaningfulAmount(row.valuation_yuan)) {
+    return { value: String(row.valuation_yuan), isEstimate: true };
+  }
+  return null;
+}
+
+function getOfferOrValuationDate(row: ReportMeta): string | null {
+  if (hasMeaningfulAmount(row.offer_yuan) && row.offer_date) {
+    return row.offer_date;
+  }
+  if (hasMeaningfulAmount(row.valuation_yuan) && row.valuation_date) {
+    return row.valuation_date;
+  }
+  return null;
+}
+
+function getTrackingPreviewLines(value: string | null | undefined): string[] {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 const ALL_COLUMNS: ColumnDef[] = [
-  // ── Default visible (existing report fields) ──
+  // 1. 标的编码
   { key: "bd_code", label: "标的编码", defaultVisible: true, sortable: true },
+
+  // 2. 标的项目（可点击跳转）
   {
-    key: "company_name",
-    label: "标的主体",
+    key: "project_name",
+    label: "标的项目",
     defaultVisible: true,
-    sortable: true,
     render: (val, row) => (
       <button
         onClick={() => window.__navigateReport?.(row.report_id)}
@@ -88,48 +121,92 @@ const ALL_COLUMNS: ColumnDef[] = [
       </button>
     ),
   },
-  { key: "project_name", label: "标的项目", defaultVisible: true, sortable: true },
-  { key: "industry", label: "行业", defaultVisible: true },
+
+  // 3. 标的主体（普通文本）
   {
-    key: "score",
-    label: "评分",
+    key: "company_name",
+    label: "标的主体",
     defaultVisible: true,
-    sortable: true,
     render: (val) => (
-      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${scoreColor(val)}`}>
-        {val !== null && val !== undefined ? Number(val).toFixed(1) : "--"}
+      <span className="truncate block max-w-[200px]" title={val}>
+        {val || "--"}
       </span>
     ),
   },
+
+  // 4. 行业（合并 industry + industry_tags）
   {
-    key: "rating",
-    label: "评级",
+    key: "industry",
+    label: "行业",
     defaultVisible: true,
     render: (val, row) => {
-      const finalRating = getFinalRating(row);
-      const isManual = !!row.manual_rating;
-      const options = ["强烈推荐", "推荐", "谨慎推荐", "不推荐", "不建议"];
+      const tags = row.industry_tags
+        ? String(row.industry_tags).split(/[,，]/).map((t: string) => t.trim()).filter(Boolean)
+        : [];
+      return (
+        <div className="flex flex-wrap items-center gap-1 max-w-[250px]">
+          {val ? <span className="text-sm text-gray-800">{val}</span> : null}
+          {tags.map((tag: string, i: number) => (
+            <span key={i} className="inline-block px-1.5 py-0 rounded text-xs bg-blue-50 text-blue-600">
+              #{tag}
+            </span>
+          ))}
+          {!val && tags.length === 0 && <span className="text-gray-400 text-xs">--</span>}
+        </div>
+      );
+    },
+  },
+
+  // 5. 可行性评级（A-E + 手动覆盖下拉）
+  {
+    key: "feasibility_rating",
+    label: "评级",
+    defaultVisible: true,
+    sortable: true,
+    render: (val, row) => {
+      const rating = row.feasibility_rating;
+      const hasPending = !!row.pending_rating_change;
+      const options = ["A", "B", "C", "D", "E"];
+
+      if (hasPending) {
+        let pendingRating = "";
+        try {
+          const pending = JSON.parse(row.pending_rating_change || "{}");
+          pendingRating = pending.rating || "";
+        } catch (e) { /* ignore */ }
+
+        return (
+          <div className="flex items-center gap-1">
+            <span className={`inline-block px-2 py-0.5 rounded text-xs border ${ratingColor(rating)}`}>
+              {rating || "?"}
+            </span>
+            <span className="text-xs text-gray-400">→</span>
+            <span className={`inline-block px-2 py-0.5 rounded text-xs border ${ratingColor(pendingRating)} animate-pulse`}>
+              {pendingRating}
+            </span>
+            <button
+              onClick={(e) => { e.stopPropagation(); window.__openRatingConfirmModal?.(row.report_id); }}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              待确认
+            </button>
+          </div>
+        );
+      }
 
       return (
-        <div className="flex items-center gap-2">
-          {finalRating ? (
-            <span className={`inline-block px-2 py-0.5 rounded text-xs ${ratingBadge(finalRating)}`}>
-              {stars(row.score)} {finalRating}
-            </span>
-          ) : (
-            <span className="text-gray-400 text-xs">--</span>
-          )}
-          {isManual && (
-            <span className="text-xs text-purple-600 font-medium" title="人工评级">✓</span>
-          )}
+        <div className="flex items-center gap-1">
+          <span className={`inline-block px-2 py-0.5 rounded text-xs border ${ratingColor(rating)}`}>
+            {rating || "--"}
+          </span>
           <select
-            value={row.manual_rating || ""}
-            onChange={(e) => window.__updateManualRating?.(row.report_id, e.target.value || null)}
+            value={rating || ""}
+            onChange={(e) => window.__updateFeasibilityRating?.(row.report_id, e.target.value || null)}
             className="text-xs px-1 py-0.5 rounded border bg-white hover:bg-gray-50"
-            title={row.manual_rating_note || "点击修改人工评级"}
+            title="手动覆盖评级"
             onClick={(e) => e.stopPropagation()}
           >
-            <option value="">使用AI评级</option>
+            <option value="">AI评级</option>
             {options.map((opt) => (
               <option key={opt} value={opt}>{opt}</option>
             ))}
@@ -138,24 +215,32 @@ const ALL_COLUMNS: ColumnDef[] = [
       );
     },
   },
+
+  // 6. 评级时间
+  {
+    key: "feasibility_rating_at",
+    label: "评级时间",
+    defaultVisible: true,
+    render: (val) => <span className="text-xs text-gray-600">{formatDate(val || "")}</span>,
+  },
+
+  // 7. 报告生成状态
   {
     key: "status",
     label: "报告生成状态",
     defaultVisible: true,
     render: (val, row) => {
-      // Check if there's a live intake task for this report
       const liveTask = window.__intakeTasks?.[row.report_id]
         ?? (row.bd_code ? window.__intakeTasks?.[row.bd_code] : undefined);
       if (liveTask && liveTask.status !== "completed" && liveTask.status !== "cancelled" && liveTask.status !== "failed") {
         const stepLabel = liveTask.step > 0 ? ` Step${liveTask.step}/${liveTask.total_steps}` : "";
-        if (liveTask.status === "cancelling") {
+        if (liveTask.status === "cancelling")
           return <span className="inline-block px-2 py-0.5 rounded text-xs bg-orange-100 text-orange-600 animate-pulse">终止中</span>;
-        }
         if (liveTask.status === "queued") {
           const pos = liveTask.queue_position ?? "";
           return <span className="inline-block px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">排队中{pos ? ` 第${pos}位` : ""}</span>;
         }
-        const isUpdate = liveTask.op_type === "light_update" || liveTask.op_type === "full_regenerate";
+        const isUpdate = liveTask.op_type === "light_update" || liveTask.op_type === "full_regenerate" || liveTask.op_type === "update";
         return (
           <span className="inline-block px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700 animate-pulse">
             {isUpdate ? "更新中" : "生成中"}⟳{stepLabel}
@@ -181,16 +266,105 @@ const ALL_COLUMNS: ColumnDef[] = [
       return <span className="text-gray-400">{val || "--"}</span>;
     },
   },
+
+  // 8. 跟进动态
+  {
+    key: "referral_status",
+    label: "跟进动态",
+    defaultVisible: true,
+    render: (val, row) => {
+      const lines = getTrackingPreviewLines(val);
+      const previewLines = lines.slice(0, 3);
+      const fullPreview = lines.slice(0, 5).join("\n");
+      if (previewLines.length === 0) {
+        return <span className="text-gray-400 text-xs">--</span>;
+      }
+      return (
+        <div className="max-w-[280px]" title={fullPreview}>
+          <div className="space-y-1">
+            {previewLines.map((line, idx) => (
+              <p
+                key={`${row.report_id}-tracking-${idx}`}
+                className="text-xs leading-5 text-gray-700 line-clamp-1"
+              >
+                {line}
+              </p>
+            ))}
+          </div>
+              <button
+            onClick={(e) => {
+              e.stopPropagation();
+              window.__navigateReportChunk?.(row.report_id, "tracking");
+            }}
+            className="mt-1 text-xs text-blue-600 hover:underline"
+            title={fullPreview}
+          >
+            {lines.length > 3 ? "查看更多" : "查看详情"}
+          </button>
+        </div>
+      );
+    },
+  },
+
+  // 9. 营业收入
+  {
+    key: "revenue",
+    label: "营业收入",
+    defaultVisible: true,
+    render: (val, row) => {
+      if (row.revenue_yuan) return <span className="text-sm">{formatMoney(row.revenue_yuan)}</span>;
+      return <span className="text-sm">{val || "--"}</span>;
+    },
+  },
+
+  // 10. 报价/估值
+  {
+    key: "offer_or_valuation",
+    label: "报价/估值",
+    defaultVisible: true,
+    sortable: true,
+    render: (_val, row) => {
+      const data = getOfferOrValuation(row);
+      if (!data) return <span className="text-gray-400 text-xs">--</span>;
+      return (
+        <span className="text-sm">
+          {formatMoney(data.value)}
+          {data.isEstimate && <span className="text-orange-500 text-xs ml-0.5" title="估值（非报价）">*</span>}
+        </span>
+      );
+    },
+  },
+
+  // 11. 报价/估值时间
+  {
+    key: "offer_or_valuation_date",
+    label: "报价/估值时间",
+    defaultVisible: true,
+    render: (_val, row) => {
+      const date = getOfferOrValuationDate(row);
+      return <span className="text-xs text-gray-600">{date ? formatMonth(date) : "--"}</span>;
+    },
+  },
+
+  // 12. 附件
   {
     key: "attachments",
     label: "附件",
     defaultVisible: true,
     render: (val, row) => {
       const count = Array.isArray(val) ? val.length : 0;
-      if (count === 0) return <span className="text-gray-400 text-xs">--</span>;
-      return <AttachmentPopover reportId={row.report_id} initialCount={count} onUpdate={() => window.__refreshReports?.()} />;
+      return (
+        <AttachmentPopover
+          reportId={row.report_id}
+          initialCount={count}
+          onUpdate={() => window.__refreshReports?.()}
+          onTaskCreated={() => window.__refreshIntakeTasks?.()}
+        />
+      );
     },
   },
+
+  // 13. 推送状态
   {
     key: "push_status",
     label: "推送状态",
@@ -201,7 +375,7 @@ const ALL_COLUMNS: ColumnDef[] = [
         ? `推送时间: ${info.pushed_at?.slice(0, 19).replace("T", " ") ?? "?"}\n已推送: ${info.uploaded}/${info.total} 条`
         : undefined;
       if (val === "no_chunks")
-        return <span className="inline-block px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500" title="无索引数据">无索引</span>;
+        return <span className="inline-block px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500" title="无��引数据">无索引</span>;
       if (val === "not_pushed")
         return <span className="inline-block px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-600">未推送</span>;
       if (val === "pushed")
@@ -211,71 +385,42 @@ const ALL_COLUMNS: ColumnDef[] = [
       return <span className="text-gray-400">--</span>;
     },
   },
-  { key: "revenue", label: "营业收入", defaultVisible: true },
-  { key: "net_profit", label: "净利润", defaultVisible: true },
+
+  // 14. 更新时间
   {
-    key: "created_at",
-    label: "生成日期",
+    key: "updated_at",
+    label: "更新时间",
     defaultVisible: true,
     sortable: true,
-    render: (val) => formatDate(val || ""),
+    render: (val) => <span className="text-xs text-gray-600">{formatDate(val || "")}</span>,
   },
-  {
-    key: "file_size",
-    label: "大小",
-    defaultVisible: true,
-    render: (val) => formatSize(val || 0),
-  },
-  {
-    key: "token_usage_json",
-    label: "Token 用量",
-    defaultVisible: false,
-    render: (val) => {
-      if (!val) return <span className="text-gray-400 text-xs">--</span>;
-      try {
-        const usage = JSON.parse(val);
-        const total = Object.values(usage).reduce((sum: number, count: any) => sum + (typeof count === 'number' ? count : 0), 0);
-        return <span className="text-xs text-gray-600">{total.toLocaleString()}</span>;
-      } catch {
-        return <span className="text-gray-400 text-xs">--</span>;
-      }
-    },
-  },
-  {
-    key: "estimated_cost",
-    label: "预估成本",
-    defaultVisible: false,
-    sortable: true,
-    render: (val) => {
-      if (val === null || val === undefined) return <span className="text-gray-400 text-xs">--</span>;
-      return <span className="text-xs text-gray-600">¥{Number(val).toFixed(2)}</span>;
-    },
-  },
-  // ── Excel fields (hidden by default) ──
+
+  // ── 默认隐藏 ──
+  { key: "net_profit", label: "净利润", defaultVisible: false },
   { key: "province", label: "省", defaultVisible: false },
   { key: "city", label: "市", defaultVisible: false },
   { key: "district", label: "区", defaultVisible: false },
   { key: "is_listed", label: "上市情况", defaultVisible: false },
   { key: "stock_code", label: "上市编号", defaultVisible: false },
-  { key: "valuation_yuan", label: "估值（元）", defaultVisible: false },
-  { key: "valuation_date", label: "估值日期", defaultVisible: false },
   { key: "website", label: "官网地址", defaultVisible: false },
-  { key: "industry_tags", label: "行业标签", defaultVisible: false },
-  { key: "referral_status", label: "推介情况", defaultVisible: false },
-  { key: "is_traded", label: "是否已交易", defaultVisible: false },
   { key: "description", label: "标的描述", defaultVisible: false },
-  { key: "company_intro", label: "标的主体公司简介", defaultVisible: false },
   { key: "dept_primary", label: "负责人主属部门", defaultVisible: false },
   { key: "dept_owner", label: "归属部门", defaultVisible: false },
-  { key: "remarks", label: "备注", defaultVisible: false },
+  { key: "estimated_cost", label: "预估成本", defaultVisible: false, sortable: true,
+    render: (val) => {
+      if (val === null || val === undefined) return <span className="text-gray-400 text-xs">--</span>;
+      return <span className="text-xs text-gray-600">¥{Number(val).toFixed(2)}</span>;
+    },
+  },
 ];
 
 // Persist column config in localStorage
-const STORAGE_KEY = "dd_report_columns";
+const STORAGE_KEY = "dd_report_columns_v4";
+const LEGACY_STORAGE_KEY = "dd_report_columns_v3";
 
 function loadColumnConfig(): { visible: string[]; order: string[] } | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -290,9 +435,12 @@ function saveColumnConfig(visible: string[], order: string[]) {
 declare global {
   interface Window {
     __navigateReport?: (id: string) => void;
+    __navigateReportChunk?: (id: string, chunkId: string) => void;
     __confirmReport?: (id: string) => void;
     __refreshReports?: () => void;
-    __updateManualRating?: (id: string, rating: string | null) => void;
+    __refreshIntakeTasks?: () => void;
+    __updateFeasibilityRating?: (id: string, rating: string | null) => void;
+    __openRatingConfirmModal?: (id: string) => void;
     __intakeTasks?: Record<string, IntakeTaskStatus>;
   }
 }
@@ -309,6 +457,9 @@ export default function ReportsPage() {
   // Edit modal
   const [editReport, setEditReport] = useState<ReportMeta | null>(null);
 
+  // Rating confirm modal
+  const [ratingConfirmReport, setRatingConfirmReport] = useState<ReportMeta | null>(null);
+
   // Confirm report handler
   const handleConfirm = useCallback(async (id: string) => {
     try {
@@ -319,71 +470,157 @@ export default function ReportsPage() {
     }
   }, []);
 
-  // Update manual rating handler
-  const handleUpdateManualRating = useCallback(async (id: string, rating: string | null) => {
+  // Update feasibility rating handler
+  const handleUpdateFeasibilityRating = useCallback(async (id: string, rating: string | null) => {
     try {
-      await updateReportMeta(id, { manual_rating: rating });
+      await updateReportMeta(id, { feasibility_rating: rating });
       fetchReportsRef.current?.();
     } catch (e: any) {
-      alert("更新人工评级失败: " + e.message);
+      alert("更新评级失败: " + e.message);
     }
   }, []);
 
   // Intake task status — poll while any tasks are running, expose via window global
-  const [intakeTasks, setIntakeTasks] = useState<Record<string, IntakeTaskStatus>>({});
+  const [intakeTasks, setIntakeTasks] = useState<Record<string, IntakeTaskStatus>>({});;
 
   useEffect(() => {
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastKnownActiveTask = true;
+
+    const scheduleNextPoll = (delay = 3000) => {
+      if (!active) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(poll, delay);
+    };
+
     const poll = async () => {
       try {
         const { tasks } = await listIntakeTasks();
         if (!active) return;
         // Index by report_id and bd_code for O(1) lookup in render
         const byKey: Record<string, IntakeTaskStatus> = {};
+        let hasRunningTasks = false;
         for (const t of tasks) {
           if (t.report_id) byKey[t.report_id] = t;
           if (t.bd_code) byKey[t.bd_code] = t;
+          if (t.status !== "completed" && t.status !== "cancelled" && t.status !== "failed") {
+            hasRunningTasks = true;
+          }
         }
+        lastKnownActiveTask = hasRunningTasks;
         setIntakeTasks(byKey);
         window.__intakeTasks = byKey;
-      } catch {}
+        if (hasRunningTasks) {
+          scheduleNextPoll();
+        }
+      } catch {
+        // Keep retrying after transient request failures so list badges can recover.
+        if (lastKnownActiveTask) {
+          scheduleNextPoll();
+        }
+      }
+    };
+    window.__refreshIntakeTasks = () => {
+      lastKnownActiveTask = true;
+      poll();
     };
     poll();
-    const timer = setInterval(poll, 3000);
     return () => {
       active = false;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
       delete window.__intakeTasks;
+      delete window.__refreshIntakeTasks;
     };
   }, []);
 
   // fetchReports ref for global access
   const fetchReportsRef = useRef<(() => void) | null>(null);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
+  const hasLoadedOnceRef = useRef(false);
+
+  const [reports, setReports] = useState<ReportMeta[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Register global helpers for render functions
   useEffect(() => {
     window.__navigateReport = (id: string) => navigate(`/report/${id}`);
+    window.__navigateReportChunk = (id: string, chunkId: string) =>
+      navigate(`/report/${id}?tab=chunks&chunk=${encodeURIComponent(chunkId)}`);
     window.__confirmReport = (id: string) => handleConfirm(id);
     window.__refreshReports = () => fetchReportsRef.current?.();
-    window.__updateManualRating = (id: string, rating: string | null) => handleUpdateManualRating(id, rating);
+    window.__updateFeasibilityRating = (id: string, rating: string | null) => handleUpdateFeasibilityRating(id, rating);
+    window.__openRatingConfirmModal = (id: string) => {
+      const report = reports.find(r => r.report_id === id);
+      if (report) setRatingConfirmReport(report);
+    };
     return () => {
       delete window.__navigateReport;
+      delete window.__navigateReportChunk;
       delete window.__confirmReport;
       delete window.__refreshReports;
-      delete window.__updateManualRating;
+      delete window.__updateFeasibilityRating;
+      delete window.__openRatingConfirmModal;
     };
-  }, [navigate, handleConfirm, handleUpdateManualRating]);
-
-  const [reports, setReports] = useState<ReportMeta[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  }, [navigate, handleConfirm, handleUpdateFeasibilityRating, reports]);
 
   // Filters
   const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [showSearchSuggestions, setShowSearchSuggestions] = useState(false);
+  const [searchSuggestionPool, setSearchSuggestionPool] = useState<SearchSuggestionItem[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
   const [ratingFilter, setRatingFilter] = useState("all");
   const [pushStatusFilter, setPushStatusFilter] = useState("all");
   const [ownerFilter, setOwnerFilter] = useState("all");
+
+  const searchSuggestions = useMemo(() => {
+    const q = searchInput.trim().toLowerCase();
+    if (!q) return [];
+    const scoreName = (name: string, source: SuggestionSource): number => {
+      const n = name.toLowerCase();
+      const sourceBoost = source === "项目名" ? 20 : source === "行业" ? 10 : 0;
+      if (n === q) return 1000;
+      if (n.startsWith(q)) return 800 - (n.length - q.length) + sourceBoost;
+      const idx = n.indexOf(q);
+      if (idx >= 0) return 600 - idx + sourceBoost;
+      let pos = 0;
+      let matched = 0;
+      for (const ch of q) {
+        const found = n.indexOf(ch, pos);
+        if (found === -1) break;
+        matched += 1;
+        pos = found + 1;
+      }
+      return matched > 0 ? matched * 10 + sourceBoost : -1;
+    };
+    return searchSuggestionPool
+      .map((item) => ({ ...item, score: scoreName(item.value, item.source) }))
+      .filter((x) => x.score >= 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10)
+      .map((x) => ({ value: x.value, source: x.source }));
+  }, [searchInput, searchSuggestionPool]);
+
+  const renderSuggestion = (item: SearchSuggestionItem) => {
+    const q = searchInput.trim();
+    const name = item.value;
+    if (!q) return name;
+    const idx = name.toLowerCase().indexOf(q.toLowerCase());
+    if (idx < 0) return name;
+    const before = name.slice(0, idx);
+    const hit = name.slice(idx, idx + q.length);
+    const after = name.slice(idx + q.length);
+    return (
+      <>
+        {before}
+        <span className="bg-yellow-100 text-yellow-800 px-0.5 rounded">{hit}</span>
+        {after}
+      </>
+    );
+  };
 
   // Batch push modal
   const [showBatchPush, setShowBatchPush] = useState(false);
@@ -436,6 +673,17 @@ export default function ReportsPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, [showColConfig]);
 
+  useEffect(() => {
+    if (!showSearchSuggestions) return;
+    const handler = (e: MouseEvent) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) {
+        setShowSearchSuggestions(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showSearchSuggestions]);
+
   // Save column config when it changes
   useEffect(() => {
     saveColumnConfig(visibleKeys, columnOrder);
@@ -461,7 +709,8 @@ export default function ReportsPage() {
   const [ownerOptions, setOwnerOptions] = useState<string[]>([]);
 
   const fetchReports = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnceRef.current) setInitialLoading(true);
+    else setTableLoading(true);
     setError(null);
     try {
       // Map frontend filter values to backend API values
@@ -476,15 +725,9 @@ export default function ReportsPage() {
       if (statusFilter !== "all") params.status = statusFilter;
       if (ownerFilter !== "all") params.owner = ownerFilter;
 
-      // Map rating filter to backend format
+      // Feasibility rating filter (A-E)
       if (ratingFilter !== "all") {
-        if (ratingFilter === "recommended") {
-          params.rating = "推荐";  // Backend will match "强烈推荐" or "推荐"
-        } else if (ratingFilter === "cautious") {
-          params.rating = "谨慎推荐";
-        } else if (ratingFilter === "not_recommended") {
-          params.rating = "不推荐";  // Backend will match "不推荐" or "不建议"
-        }
+        params.feasibility_rating = ratingFilter;
       }
 
       // Note: pushStatusFilter is not supported by backend yet, so we skip it
@@ -493,6 +736,31 @@ export default function ReportsPage() {
       setReports(data.reports);
       setTotalRecords(data.total);
       setTotalPages(data.total_pages);
+      setSearchSuggestionPool((prev) => {
+        const priority: Record<SuggestionSource, number> = { "项目名": 3, "行业": 2, "标签": 1 };
+        const next = new Map<string, SearchSuggestionItem>();
+        prev.forEach((item) => next.set(item.value, item));
+        const upsert = (value: string, source: SuggestionSource) => {
+          const key = value.trim();
+          if (!key) return;
+          const old = next.get(key);
+          if (!old || priority[source] > priority[old.source]) {
+            next.set(key, { value: key, source });
+          }
+        };
+        data.reports.forEach((r) => {
+          const projectName = String(r.project_name || "").trim();
+          upsert(projectName, "项目名");
+          const industry = String(r.industry || "").trim();
+          upsert(industry, "行业");
+          const tags = String(r.industry_tags || "")
+            .split(/[,\uff0c]/)
+            .map((t) => t.trim())
+            .filter(Boolean);
+          tags.forEach((t) => upsert(t, "标签"));
+        });
+        return Array.from(next.values());
+      });
 
       // Extract unique owners for filter dropdown (only on first load or when needed)
       if (isAdmin && ownerOptions.length === 0) {
@@ -503,7 +771,9 @@ export default function ReportsPage() {
     } catch (e: any) {
       setError(e.message);
     }
-    setLoading(false);
+    hasLoadedOnceRef.current = true;
+    setInitialLoading(false);
+    setTableLoading(false);
   }, [page, pageSize, search, statusFilter, ratingFilter, ownerFilter, sortKey, sortDir, isAdmin, ownerOptions.length]);
 
   fetchReportsRef.current = fetchReports;
@@ -512,8 +782,20 @@ export default function ReportsPage() {
     fetchReports();
   }, [fetchReports]);
 
+  const executeSearch = () => {
+    const next = searchInput.trim();
+    if (next === search) {
+      setPage(1);
+      fetchReportsRef.current?.();
+    } else {
+      setSearch(next);
+      setPage(1);
+    }
+    setShowSearchSuggestions(false);
+  };
+
   // Reset to page 1 when filters change
-  useEffect(() => { setPage(1); }, [search, statusFilter, ratingFilter, pushStatusFilter, ownerFilter, pageSize]);
+  useEffect(() => { setPage(1); }, [statusFilter, ratingFilter, pushStatusFilter, ownerFilter, pageSize]);
 
   const allOnPageSelected =
     reports.length > 0 && reports.every((r) => selected.has(r.report_id));
@@ -666,8 +948,7 @@ export default function ReportsPage() {
   const getCellText = (col: ColumnDef, row: ReportMeta): string => {
     const val = row[col.key];
     if (val === null || val === undefined) return "";
-    if (col.key === "created_at") return formatDate(String(val));
-    if (col.key === "file_size") return formatSize(Number(val));
+    if (col.key === "updated_at" || col.key === "feasibility_rating_at") return formatDate(String(val));
     if (col.key === "status") {
       if (val === "completed") return "已完成";
       if (val === "updated") return "已更新";
@@ -684,11 +965,16 @@ export default function ReportsPage() {
       if (val === "pushed") return "已推送";
       if (val === "outdated") return "需更新";
     }
-    if (col.key === "score" && typeof val === "number") return val.toFixed(1);
-    if (col.key === "rating") {
-      const finalRating = getFinalRating(row);
-      return finalRating ? `${stars(row.score)} ${finalRating}` : "";
+    if (col.key === "feasibility_rating") return String(val);
+    if (col.key === "offer_or_valuation") {
+      const data = getOfferOrValuation(row);
+      return data ? `${formatMoney(data.value)}${data.isEstimate ? "*" : ""}` : "";
     }
+    if (col.key === "offer_or_valuation_date") {
+      const date = getOfferOrValuationDate(row);
+      return date ? formatMonth(date) : "";
+    }
+    if (col.key === "revenue" && row.revenue_yuan) return formatMoney(row.revenue_yuan);
     if (col.key === "manual_rating") return val || "";
     if (col.key === "token_usage_json") {
       if (!val) return "";
@@ -728,7 +1014,7 @@ export default function ReportsPage() {
     URL.revokeObjectURL(url);
   };
 
-  if (loading) {
+  if (initialLoading) {
     return <div className="flex items-center justify-center py-20 text-gray-400">加载中...</div>;
   }
 
@@ -752,31 +1038,71 @@ export default function ReportsPage() {
           onClick={() => navigate("/new")}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
         >
-          + 新建标的
+          + 智能录入
         </button>
       </div>
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
-        <input
-          type="text"
-          placeholder="搜索项目/主体/编号..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="border rounded-lg px-3 py-1.5 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-300"
-        />
+        <div className="relative w-72" ref={searchBoxRef}>
+          <button
+            onClick={executeSearch}
+            className="absolute left-1 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 hover:text-blue-600"
+            title="搜索"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35m1.35-5.65a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </button>
+          <input
+            type="text"
+            placeholder="搜索项目名称、行业"
+            value={searchInput}
+            onFocus={() => setShowSearchSuggestions(searchSuggestions.length > 0)}
+            onChange={(e) => {
+              setSearchInput(e.target.value);
+              setShowSearchSuggestions(e.target.value.trim().length > 0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") executeSearch();
+            }}
+            className="border rounded-lg pl-9 pr-3 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-300"
+          />
+          {showSearchSuggestions && searchSuggestions.length > 0 && (
+            <div className="absolute z-50 top-full mt-1 w-full bg-white border rounded-lg shadow-lg overflow-hidden">
+              {searchSuggestions.map((item) => (
+                <button
+                  key={`${item.source}-${item.value}`}
+                  onClick={() => {
+                    setSearchInput(item.value);
+                    setShowSearchSuggestions(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 flex items-center justify-between gap-2"
+                  title={item.value}
+                >
+                  <span className="truncate">{renderSuggestion(item)}</span>
+                  <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 shrink-0">
+                    {item.source}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <select value={ratingFilter} onChange={(e) => setRatingFilter(e.target.value)}
+          className="border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+          <option value="all">评级: 全部</option>
+          <option value="A">A</option>
+          <option value="B">B</option>
+          <option value="C">C</option>
+          <option value="D">D</option>
+          <option value="E">E</option>
+        </select>
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
           className="border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
           <option value="all">状态: 全部</option>
           <option value="completed">已完成</option>
           <option value="updated">已更新</option>
-        </select>
-        <select value={ratingFilter} onChange={(e) => setRatingFilter(e.target.value)}
-          className="border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
-          <option value="all">评级: 全部</option>
-          <option value="recommended">推荐及以上</option>
-          <option value="cautious">谨慎推荐</option>
-          <option value="not_recommended">不推荐</option>
         </select>
         <select value={pushStatusFilter} onChange={(e) => setPushStatusFilter(e.target.value)}
           className="border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
@@ -795,6 +1121,7 @@ export default function ReportsPage() {
             ))}
           </select>
         )}
+        {tableLoading && <span className="text-xs text-gray-500">加载中...</span>}
         {/* Export & Column config */}
         <div className="flex items-center gap-2 ml-auto">
         <button
@@ -875,7 +1202,7 @@ export default function ReportsPage() {
       {/* Table */}
       {reports.length === 0 ? (
         <div className="text-center py-16 text-gray-400">
-          {totalRecords === 0 ? "暂无报告，点击「新建报告」开始生成" : "没有符合筛选条件的报告"}
+          {totalRecords === 0 ? "暂无报告，点击「智能录入」开始创建或更新标的" : "没有符合筛选条件的报告"}
         </div>
       ) : (
         <div className="bg-white rounded-lg shadow overflow-x-auto">
@@ -979,7 +1306,7 @@ export default function ReportsPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                   d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              生成报告
+              智能更新
             </button>
             <a
               href={getPdfDownloadUrl(r.report_id)}
@@ -1092,6 +1419,17 @@ export default function ReportsPage() {
           report={editReport}
           onClose={() => setEditReport(null)}
           onSaved={() => { setEditReport(null); fetchReports(); }}
+        />
+      )}
+
+      {/* Rating confirm modal */}
+      {ratingConfirmReport && (
+        <RatingConfirmModal
+          reportId={ratingConfirmReport.report_id}
+          currentRating={ratingConfirmReport.feasibility_rating || null}
+          pendingChange={ratingConfirmReport.pending_rating_change || null}
+          onClose={() => setRatingConfirmReport(null)}
+          onConfirm={() => { setRatingConfirmReport(null); fetchReports(); }}
         />
       )}
     </div>

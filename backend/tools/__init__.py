@@ -4,6 +4,7 @@ import tools.duckduckgo_search  # noqa: F401
 import tools.bing_search  # noqa: F401
 import tools.baidu_search  # noqa: F401
 import tools.bocha_search  # noqa: F401
+import tools.multi_search_engine  # noqa: F401
 import tools.jina_reader  # noqa: F401
 import tools.local_scraper  # noqa: F401
 import tools.cninfo  # noqa: F401

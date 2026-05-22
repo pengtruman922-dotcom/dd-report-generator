@@ -76,14 +76,18 @@ class CninfoProvider(ToolProvider):
 
         category_code = _CATEGORY_MAP.get(category, "")
 
+        # cninfo API requires searchkey for reliable results, not stock field
+        # Use stock_code as searchkey if no explicit keyword provided
+        search_term = keyword if keyword else stock_code
+
         form_data = {
             "pageNum": 1,
             "pageSize": max_results,
             "column": "szse" if stock_code.startswith(("0", "3")) else "sse",
             "tabName": "fulltext",
             "plate": "",
-            "stock": stock_code,
-            "searchkey": keyword,
+            "stock": "",  # Leave empty, use searchkey instead
+            "searchkey": search_term,
             "secid": "",
             "category": category_code,
             "trade": "",
@@ -99,6 +103,8 @@ class CninfoProvider(ToolProvider):
                 "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
             ),
             "Accept": "application/json",
+            "Referer": "http://www.cninfo.com.cn/new/disclosure",
+            "Origin": "http://www.cninfo.com.cn",
         }
 
         async with httpx.AsyncClient(timeout=15) as client:

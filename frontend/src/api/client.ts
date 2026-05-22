@@ -1,16 +1,13 @@
 import type {
   AISettings,
-  UploadResponse,
-  GenerateResponse,
   ReportResponse,
   ReportListResponse,
-  ManualInputResponse,
-  FieldDef,
   ReportChunk,
   UserInfo,
   AttachmentInfo,
   ToolProviderInfo,
   ToolsConfig,
+  ModelWorkbenchResponse,
 } from "../types";
 
 const BASE = "/api";
@@ -35,50 +32,6 @@ async function authFetch(url: string, options: RequestInit = {}): Promise<Respon
   return res;
 }
 
-// ── Upload (no auth needed for upload endpoints, but we add token anyway) ──
-
-export async function uploadExcel(file: File): Promise<UploadResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  const res = await authFetch(`${BASE}/upload/excel`, { method: "POST", body: form });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function submitManualInput(
-  data: Record<string, string>,
-): Promise<ManualInputResponse> {
-  const res = await authFetch(`${BASE}/upload/manual`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getFieldDefs(): Promise<FieldDef[]> {
-  const res = await authFetch(`${BASE}/upload/fields`);
-  if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
-  return data.fields;
-}
-
-export async function uploadAttachments(
-  sessionId: string,
-  bdCode: string,
-  files: File[],
-): Promise<{ uploaded: number }> {
-  const form = new FormData();
-  for (const f of files) form.append("files", f);
-  const res = await authFetch(
-    `${BASE}/upload/attachments?session_id=${sessionId}&bd_code=${bdCode}`,
-    { method: "POST", body: form },
-  );
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
 // ── Settings ──
 
 export async function getSettings(): Promise<AISettings> {
@@ -96,39 +49,16 @@ export async function saveSettings(cfg: AISettings): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
-// ── Report generation & management ──
-
-export async function generateReport(
-  sessionId: string,
-  bdCode: string,
-  reportId?: string,
-): Promise<GenerateResponse> {
-  const body: Record<string, string> = { session_id: sessionId, bd_code: bdCode };
-  if (reportId) body.report_id = reportId;
-  const res = await authFetch(`${BASE}/report/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function batchGenerateReports(
-  sessionId: string,
-  bdCodes: string[],
-): Promise<{ task_ids: string[]; count: number }> {
-  const res = await authFetch(`${BASE}/report/batch-generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, bd_codes: bdCodes }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+// ── Report management ──
 
 export async function getReport(reportId: string): Promise<ReportResponse> {
   const res = await authFetch(`${BASE}/report/${reportId}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getReportMeta(reportId: string): Promise<import("../types").ReportMeta> {
+  const res = await authFetch(`${BASE}/report/${reportId}/meta`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -151,9 +81,65 @@ export interface ListReportsParams {
   search?: string;
   status?: string;
   rating?: string;
+  feasibility_rating?: string;
   owner?: string;
   sort_by?: string;
   sort_dir?: string;
+}
+
+export async function getModelWorkbench(): Promise<ModelWorkbenchResponse> {
+  const res = await authFetch(`${BASE}/settings/model-workbench`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function saveModelWorkbench(payload: {
+  ai_config: Record<string, any>;
+  prompt_overrides: Record<string, string>;
+}): Promise<void> {
+  const res = await authFetch(`${BASE}/settings/model-workbench`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+export async function testModelWorkbenchNode(payload: {
+  node_id: string;
+  ai_config: Record<string, any>;
+}): Promise<{
+  ok: boolean;
+  node_id: string;
+  node_label: string;
+  message: string;
+  provider: {
+    base_url: string;
+    model: string;
+    base_url_source: string;
+    model_source: string;
+    api_key_source: string;
+  };
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}> {
+  const res = await authFetch(`${BASE}/settings/model-workbench/test-node`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let message = await res.text();
+    try {
+      const data = JSON.parse(message);
+      message = data.detail || message;
+    } catch {}
+    throw new Error(message);
+  }
+  return res.json();
 }
 
 export async function listReports(params?: ListReportsParams): Promise<ReportListResponse> {
@@ -163,6 +149,7 @@ export async function listReports(params?: ListReportsParams): Promise<ReportLis
   if (params?.search) queryParams.set("search", params.search);
   if (params?.status) queryParams.set("status", params.status);
   if (params?.rating) queryParams.set("rating", params.rating);
+  if (params?.feasibility_rating) queryParams.set("feasibility_rating", params.feasibility_rating);
   if (params?.owner) queryParams.set("owner", params.owner);
   if (params?.sort_by) queryParams.set("sort_by", params.sort_by);
   if (params?.sort_dir) queryParams.set("sort_dir", params.sort_dir);
@@ -212,17 +199,6 @@ export async function saveChunks(
     body: JSON.stringify(chunks),
   });
   if (!res.ok) throw new Error(await res.text());
-}
-
-export async function regenerateChunks(
-  reportId: string,
-): Promise<ReportChunk[]> {
-  const res = await authFetch(`${BASE}/report/${reportId}/regenerate-chunks`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const data = await res.json();
-  return data.chunks;
 }
 
 export async function pushToFastGPT(
@@ -311,18 +287,6 @@ export async function confirmReport(reportId: string): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
-export async function updateReportContent(
-  reportId: string,
-  content: string,
-): Promise<void> {
-  const res = await authFetch(`${BASE}/report/${reportId}/content`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
 export async function listAttachments(reportId: string): Promise<AttachmentInfo[]> {
   const res = await authFetch(`${BASE}/report/${reportId}/attachments`);
   if (!res.ok) throw new Error(await res.text());
@@ -332,6 +296,14 @@ export async function listAttachments(reportId: string): Promise<AttachmentInfo[
 
 export function getAttachmentDownloadUrl(reportId: string, filename: string): string {
   return `${BASE}/report/${reportId}/attachments/${encodeURIComponent(filename)}`;
+}
+
+export async function downloadAttachmentFile(reportId: string, filename: string): Promise<Blob> {
+  const res = await authFetch(
+    `${BASE}/report/${reportId}/attachments/${encodeURIComponent(filename)}`,
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return res.blob();
 }
 
 export async function deleteAttachment(reportId: string, filename: string): Promise<void> {
@@ -345,12 +317,26 @@ export async function deleteAttachment(reportId: string, filename: string): Prom
 export async function uploadReportAttachments(
   reportId: string,
   files: File[],
-): Promise<{ uploaded: number }> {
+): Promise<{ uploaded: number; files: AttachmentInfo[] }> {
   const form = new FormData();
   for (const f of files) form.append("files", f);
   const res = await authFetch(`${BASE}/report/${reportId}/attachments`, {
     method: "POST",
     body: form,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function startAttachmentUpdate(
+  reportId: string,
+  attachmentFilenames: string[],
+  note = "",
+): Promise<import("../types").IntakeExecuteResult> {
+  const res = await authFetch(`${BASE}/report/${reportId}/attachments/update-report`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ attachment_filenames: attachmentFilenames, note }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -379,41 +365,28 @@ export async function saveToolsConfig(config: ToolsConfig): Promise<void> {
   if (!res.ok) throw new Error(await res.text());
 }
 
-// ── Version Management ──
-
-export async function listVersions(reportId: string): Promise<{ versions: any[]; count: number }> {
-  const res = await authFetch(`${BASE}/report/${reportId}/versions`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function getVersion(reportId: string, versionId: string): Promise<any> {
-  const res = await authFetch(`${BASE}/report/${reportId}/versions/${versionId}`);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-
-export async function restoreVersion(reportId: string, versionId: string): Promise<void> {
-  const res = await authFetch(`${BASE}/report/${reportId}/versions/${versionId}/restore`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error(await res.text());
-}
-
 // ── Intake Agent ──
 
-export async function parseIntake(
+export async function startParseIntake(
   text: string,
   urls: string[],
   files: File[],
   mode: "auto" | "manual",
-): Promise<import("../types").IntakeParseResult> {
+): Promise<{ parse_job_id: string }> {
   const form = new FormData();
   form.append("text", text);
   form.append("urls", JSON.stringify(urls));
   form.append("mode", mode);
   for (const f of files) form.append("files", f);
-  const res = await authFetch(`${BASE}/intake/parse`, { method: "POST", body: form });
+  const res = await authFetch(`${BASE}/intake/parse-async`, { method: "POST", body: form });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getParseIntakeStatus(
+  parseJobId: string,
+): Promise<import("../types").IntakeParseStatus> {
+  const res = await authFetch(`${BASE}/intake/parse-status/${parseJobId}`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -451,3 +424,30 @@ export async function listIntakeTasks(): Promise<{ tasks: import("../types").Int
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+
+// ── Rating management ──
+
+export async function confirmRatingChange(
+  reportId: string,
+  action: "accept" | "reject",
+  note?: string
+): Promise<{ status: string; new_rating?: string }> {
+  const res = await authFetch(`${BASE}/report/${reportId}/rating-confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, note }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// ── Legacy chunk compatibility ──
+
+export async function getLegacyChunks(reportId: string): Promise<Record<string, any>> {
+  const res = await authFetch(`${BASE}/report/${reportId}/chunks-legacy`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export const getChunksV3 = getLegacyChunks;
+

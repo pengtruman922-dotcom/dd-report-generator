@@ -271,7 +271,7 @@ async def test_queue_isolation():
 
 @pytest.mark.asyncio
 async def test_late_subscriber():
-    """Test that late subscribers don't receive past events."""
+    """Test that late subscribers receive buffered progress events."""
     manager = SSEManager()
     task_id = "test-late"
 
@@ -284,14 +284,37 @@ async def test_late_subscriber():
     # Send event after subscription
     await manager.send_progress(task_id, 2, 5, "Late event")
 
-    # Should only receive the late event
-    event = await asyncio.wait_for(queue.get(), timeout=1.0)
-    data = json.loads(event["data"])
-    assert data["step"] == 2
-    assert data["message"] == "Late event"
+    event1 = await asyncio.wait_for(queue.get(), timeout=1.0)
+    event2 = await asyncio.wait_for(queue.get(), timeout=1.0)
+    data1 = json.loads(event1["data"])
+    data2 = json.loads(event2["data"])
 
-    # Queue should be empty (no early event)
-    assert queue.empty()
+    assert data1["step"] == 1
+    assert data1["message"] == "Early event"
+    assert data2["step"] == 2
+    assert data2["message"] == "Late event"
+
+
+@pytest.mark.asyncio
+async def test_history_limit_is_capped():
+    """Test that SSE history is capped to avoid unbounded memory growth."""
+    manager = SSEManager()
+    task_id = "test-history-limit"
+
+    for i in range(80):
+        await manager.send_progress(task_id, i, 100, f"Event {i}")
+
+    queue = manager.subscribe(task_id)
+
+    received = []
+    while not queue.empty():
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        data = json.loads(event["data"])
+        received.append(data["step"])
+
+    assert len(received) == 50
+    assert received[0] == 30
+    assert received[-1] == 79
 
 
 @pytest.mark.asyncio
@@ -352,3 +375,22 @@ async def test_cleanup_after_unsubscribe_all():
 
     manager.unsubscribe(task_id, queue2)
     assert task_id not in manager._queues  # All subscribers gone
+
+
+@pytest.mark.asyncio
+async def test_clear_task_removes_queues_and_history():
+    """Test explicit task cleanup for SSE history and subscribers."""
+    manager = SSEManager()
+    task_id = "test-clear-task"
+
+    queue = manager.subscribe(task_id)
+    await manager.send_progress(task_id, 1, 3, "Step 1")
+
+    assert task_id in manager._queues
+    assert task_id in manager._history
+
+    manager.clear_task(task_id)
+
+    assert task_id not in manager._queues
+    assert task_id not in manager._history
+    assert not queue.empty()

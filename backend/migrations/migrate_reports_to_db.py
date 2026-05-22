@@ -1,7 +1,8 @@
 """Migrate existing report JSON files to SQLite database.
 
 This script reads all report metadata from outputs/*.json files and inserts them
-into the reports table. It preserves all fields and handles edge cases gracefully.
+into the reports table. It migrates metadata sidecars only; historical
+`*_chunks.json` files are not part of the v3 runtime path.
 """
 
 import json
@@ -24,7 +25,7 @@ def migrate_reports():
     conn = get_db()
     cursor = conn.cursor()
 
-    # Find all report JSON files (exclude _chunks.json and debug files)
+    # Find all report metadata JSON files (exclude historical _chunks.json and debug files)
     json_files = []
     for json_file in OUTPUT_DIR.glob("*.json"):
         if not json_file.stem.endswith("_chunks"):

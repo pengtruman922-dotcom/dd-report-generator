@@ -1,0 +1,17 @@
+.git
+.gitignore
+.project
+backend/venv
+backend/.pytest_cache
+backend/**/__pycache__
+frontend/node_modules
+frontend/dist
+data
+outputs
+uploads
+settings.json
+*.log
+mock*.MD
+mock*.md
+backend/test_intake_full.py
+backend/test_intake_remaining.py

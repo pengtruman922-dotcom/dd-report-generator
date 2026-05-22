@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from auth import require_admin
 from config import load_settings, save_settings, DEFAULT_AI_CONFIG, DEFAULT_FASTGPT_CONFIG
+from services.model_workbench import (
+    build_workbench,
+    get_node_definition,
+    resolve_node_provider_config,
+)
 
 router = APIRouter()
 
@@ -37,31 +43,34 @@ class IntakeAgentConfig(BaseModel):
 
 
 class AISettings(BaseModel):
-    extractor: StepConfig = StepConfig()
     researcher: StepConfig = StepConfig()
-    writer: StepConfig = StepConfig()
-    field_extractor: StepConfig = StepConfig()
-    chunker: StepConfig = StepConfig()
+    matcher_agent: Optional[StepConfig] = None
+    tracking_processor: Optional[StepConfig] = None
+    info_chunk_writer: Optional[StepConfig] = None
+    index_builder: Optional[StepConfig] = None
+    rating_agent: Optional[StepConfig] = None
     fastgpt: Optional[FastGPTConfig] = None
     intake_agent: Optional[IntakeAgentConfig] = None
+
+
+class ModelWorkbenchUpdate(BaseModel):
+    ai_config: dict[str, Any]
+    prompt_overrides: dict[str, str] = {}
+
+
+class ModelConnectionTestRequest(BaseModel):
+    node_id: str
+    ai_config: dict[str, Any]
 
 
 @router.get("")
 async def get_settings(admin: dict = Depends(require_admin)):
     """Return current AI + FastGPT + intake_agent configuration, merged with defaults."""
     settings = load_settings()
-    stored = settings.get("ai_config", {})
-    # Merge stored config on top of defaults so newly added steps always appear
-    merged = {}
-    for key, default_val in DEFAULT_AI_CONFIG.items():
-        if key == "intake_agent":
-            # intake_agent returned as a top-level key matching frontend expectation
-            merged["intake_agent"] = {**default_val, **(stored.get("intake_agent", {}))}
-        else:
-            merged[key] = {**default_val, **(stored.get(key, {}))}
-    # Include FastGPT config
-    fastgpt_stored = settings.get("fastgpt", {})
-    merged["fastgpt"] = {**DEFAULT_FASTGPT_CONFIG, **fastgpt_stored}
+    stored = settings.get("ai_config", {}) or {}
+    merged = {key: {**default_val, **(stored.get(key, {}) or {})} for key, default_val in DEFAULT_AI_CONFIG.items()}
+    merged["fastgpt"] = {**DEFAULT_FASTGPT_CONFIG, **(settings.get("fastgpt", {}) or {})}
+    merged["intake_agent"] = merged.pop("intake_agent")
     return merged
 
 
@@ -81,3 +90,79 @@ async def update_settings(cfg: AISettings, admin: dict = Depends(require_admin))
         settings["ai_config"]["intake_agent"] = intake_agent
     save_settings(settings)
     return {"status": "ok"}
+
+
+@router.get("/model-workbench")
+async def get_model_workbench(admin: dict = Depends(require_admin)):
+    settings = load_settings()
+    return build_workbench(settings)
+
+
+@router.put("/model-workbench")
+async def update_model_workbench(payload: ModelWorkbenchUpdate, admin: dict = Depends(require_admin)):
+    settings = load_settings()
+    settings["ai_config"] = payload.ai_config
+    settings["prompt_overrides"] = {
+        key: value
+        for key, value in payload.prompt_overrides.items()
+        if isinstance(value, str) and value.strip()
+    }
+    save_settings(settings)
+    return {"status": "ok"}
+
+
+@router.post("/model-workbench/test-node")
+async def test_model_workbench_node(
+    payload: ModelConnectionTestRequest,
+    admin: dict = Depends(require_admin),
+):
+    node_def = get_node_definition(payload.node_id)
+    if not node_def:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    try:
+        resolved = resolve_node_provider_config(payload.node_id, payload.ai_config)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    base_url = str(resolved.get("base_url") or "").strip()
+    api_key = str(resolved.get("api_key") or "").strip()
+    model = str(resolved.get("model") or "").strip()
+
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Base URL 未配置")
+    if not model:
+        raise HTTPException(status_code=400, detail="模型名称未配置")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key 未配置")
+
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=20.0)
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "ping"}],
+            temperature=0,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"连接失败: {exc}")
+
+    usage = getattr(response, "usage", None)
+    return {
+        "ok": True,
+        "node_id": payload.node_id,
+        "node_label": node_def["label"],
+        "message": "连接测试成功",
+        "provider": {
+            "base_url": base_url,
+            "model": model,
+            "base_url_source": resolved.get("base_url_source"),
+            "model_source": resolved.get("model_source"),
+            "api_key_source": resolved.get("api_key_source"),
+        },
+        "usage": {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+            "total_tokens": getattr(usage, "total_tokens", 0) if usage else 0,
+        },
+    }

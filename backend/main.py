@@ -1,20 +1,21 @@
-"""FastAPI entry point for DD Report Generator (v1.1 with chunker)."""
+"""FastAPI entry point for the DD Report Generator."""
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import CORS_ORIGINS
 from db import init_db
-from routers import upload, report, settings, tasks
+from services.task_manager import task_manager
+from routers import report, settings, tasks
 from routers.auth_router import router as auth_router
 from routers.tools import router as tools_router
 from routers.intake import router as intake_router
-from services.task_manager import task_manager
-from services.pipeline import run_pipeline
 
 log = logging.getLogger(__name__)
 
@@ -22,14 +23,11 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    # Startup: Initialize database and recover tasks
+    # Startup: initialize database.
     init_db()
-
-    # Recover pending/running tasks
-    log.info("Recovering pending tasks...")
-    recovered = await task_manager.recover_tasks(run_pipeline)
-    if recovered > 0:
-        log.info(f"Successfully recovered {recovered} tasks")
+    repaired = await task_manager.mark_abandoned_intake_tasks_failed()
+    if repaired:
+        log.warning("Marked %s abandoned intake tasks as failed during startup", repaired)
 
     yield
 
@@ -48,7 +46,6 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
-app.include_router(upload.router, prefix="/api/upload", tags=["upload"])
 app.include_router(report.router, prefix="/api/report", tags=["report"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(tools_router, prefix="/api/tools", tags=["tools"])
@@ -59,3 +56,17 @@ app.include_router(intake_router, prefix="/api/intake", tags=["intake"])
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "version": "1.3-china"}
+
+
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    assets_dir = FRONTEND_DIST / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str):
+        requested = FRONTEND_DIST / full_path
+        if full_path and requested.exists() and requested.is_file():
+            return FileResponse(str(requested))
+        return FileResponse(str(FRONTEND_DIST / "index.html"))

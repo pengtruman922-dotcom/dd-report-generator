@@ -7,6 +7,7 @@ import logging
 log = logging.getLogger(__name__)
 
 _ocr_engine = None
+_ocr_unavailable = False
 
 # Skip images smaller than this (likely icons/bullets/logos)
 MIN_IMAGE_BYTES = 10_000  # 10 KB
@@ -17,7 +18,10 @@ def ocr_image(img_bytes: bytes) -> str:
     if len(img_bytes) < MIN_IMAGE_BYTES:
         return ""
 
-    global _ocr_engine
+    global _ocr_engine, _ocr_unavailable
+    if _ocr_unavailable:
+        return ""
+
     try:
         if _ocr_engine is None:
             from rapidocr_onnxruntime import RapidOCR
@@ -28,6 +32,7 @@ def ocr_image(img_bytes: bytes) -> str:
             return "\n".join([item[1] for item in result])
     except ImportError:
         log.warning("rapidocr-onnxruntime not installed, skipping OCR")
+        _ocr_unavailable = True
     except Exception:
         log.exception("OCR failed for image (%d bytes)", len(img_bytes))
     return ""
