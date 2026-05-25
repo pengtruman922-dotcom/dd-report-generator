@@ -6,14 +6,12 @@ export default function LoginPage() {
   const { login, changePassword } = useAuth();
   const navigate = useNavigate();
 
-  // Phase: "login" or "force_change"
   const [phase, setPhase] = useState<"login" | "force_change">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Force change password fields
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -57,95 +55,168 @@ export default function LoginPage() {
     setLoading(false);
   };
 
+  const capabilities = [
+    { title: "标的信息管理", desc: "高效录入与结构化管理卖方标的资产信息" },
+    { title: "买卖智能匹配", desc: "基于多维度特征，精准连接买卖双方需求" },
+    { title: "并购交易促成", desc: "全链路跟踪推进，助力交易高效达成" },
+  ];
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="w-full max-w-sm bg-white rounded-xl shadow-lg p-8">
-        <h1 className="text-xl font-bold text-center text-blue-700 mb-6">
-          {phase === "login" ? "并购尽调分析推荐" : "首次登录 — 修改密码"}
-        </h1>
+    <div className="min-h-screen flex flex-col lg:flex-row bg-white">
+      {/* Left - Brand Showcase */}
+      <div className="relative lg:w-[56%] w-full bg-gradient-to-br from-gray-50 to-gray-100 flex flex-col justify-center items-center px-8 py-12 lg:py-0 overflow-hidden">
+        {/* Decorative elements */}
+        <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
+          <div className="absolute top-[-10%] right-[-5%] w-[400px] h-[400px] rounded-full bg-red-50 opacity-60" />
+          <div className="absolute bottom-[-15%] left-[-10%] w-[500px] h-[500px] rounded-full bg-red-50 opacity-40" />
+          <div className="absolute top-[20%] left-[10%] w-[200px] h-[1px] bg-red-200 opacity-50 rotate-[30deg]" />
+          <div className="absolute bottom-[30%] right-[15%] w-[150px] h-[1px] bg-red-200 opacity-50 rotate-[-20deg]" />
+          <div className="absolute inset-0 opacity-[0.03]" style={{
+            backgroundImage: 'linear-gradient(rgba(0,0,0,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.1) 1px, transparent 1px)',
+            backgroundSize: '60px 60px'
+          }} />
+        </div>
 
-        {error && (
-          <div className="bg-red-50 text-red-600 text-sm rounded-lg p-3 mb-4">
-            {error}
+        <div className="relative z-10 max-w-md w-full">
+          {/* Logo */}
+          <div className="mb-10">
+            <img
+              src="/image copy.png"
+              alt="中大咨询集团"
+              className="h-10 object-contain"
+            />
           </div>
-        )}
 
-        {phase === "login" ? (
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                用户名
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-                required
-                autoFocus
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                密码
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-                required
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
-            >
-              {loading ? "登录中..." : "登录"}
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={handleChangePassword} className="space-y-4">
-            <p className="text-sm text-gray-500 mb-2">
-              首次登录需要修改密码后才能使用系统。
+          {/* Platform Name */}
+          <div className="mb-10">
+            <h1 className="text-3xl lg:text-4xl font-bold text-gray-900 tracking-tight mb-3">
+              并购智联
+            </h1>
+            <p className="text-base text-gray-500 leading-relaxed">
+              投资撮合智能服务平台
             </p>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                新密码
-              </label>
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-                required
-                autoFocus
-                minLength={6}
-              />
+          </div>
+
+          {/* Capabilities */}
+          <div className="space-y-5">
+            {capabilities.map((cap, i) => (
+              <div key={i} className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-red-600 flex items-center justify-center mt-0.5">
+                  <span className="text-white text-sm font-semibold">{i + 1}</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900 mb-0.5">{cap.title}</h3>
+                  <p className="text-sm text-gray-500 leading-relaxed">{cap.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Right - Login Form */}
+      <div className="lg:w-[44%] w-full flex items-center justify-center px-6 py-12 lg:py-0">
+        <div className="w-full max-w-sm">
+          <h2 className="text-xl font-bold text-gray-900 mb-1">
+            {phase === "login" ? "欢迎登录" : "首次登录 — 修改密码"}
+          </h2>
+          <p className="text-sm text-gray-400 mb-8">
+            {phase === "login"
+              ? "请输入您的账号信息"
+              : "首次登录需要修改密码后才能使用系统"}
+          </p>
+
+          {error && (
+            <div className="bg-red-50 border border-red-100 text-red-600 text-sm rounded-lg p-3 mb-5">
+              {error}
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                确认新密码
-              </label>
-              <input
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-                required
-                minLength={6}
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
-            >
-              {loading ? "修改中..." : "修改密码并进入"}
-            </button>
-          </form>
-        )}
+          )}
+
+          {phase === "login" ? (
+            <form onSubmit={handleLogin} className="space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  用户名
+                </label>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-100 focus:border-red-400 transition-colors"
+                  placeholder="请输入用户名"
+                  required
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  密码
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-100 focus:border-red-400 transition-colors"
+                  placeholder="请输入密码"
+                  required
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 active:bg-red-800 disabled:opacity-50 text-sm font-medium transition-colors shadow-sm"
+              >
+                {loading ? "登录中..." : "登 录"}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleChangePassword} className="space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  新密码
+                </label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-100 focus:border-red-400 transition-colors"
+                  placeholder="请输入新密码（至少6位）"
+                  required
+                  autoFocus
+                  minLength={6}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  确认新密码
+                </label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-red-100 focus:border-red-400 transition-colors"
+                  placeholder="请再次输入新密码"
+                  required
+                  minLength={6}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 active:bg-red-800 disabled:opacity-50 text-sm font-medium transition-colors shadow-sm"
+              >
+                {loading ? "修改中..." : "修改密码并进入"}
+              </button>
+            </form>
+          )}
+
+          {/* Footer */}
+          <div className="mt-12 pt-6 border-t border-gray-100">
+            <p className="text-xs text-gray-300 text-center">
+              &copy; 中大咨询集团 &middot; 投资撮合事业部
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );
