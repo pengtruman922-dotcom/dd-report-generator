@@ -1,4 +1,4 @@
-﻿"""FastGPT knowledge base uploader — push report chunks to FastGPT dataset."""
+"""FastGPT knowledge base uploader — push report chunks to FastGPT dataset."""
 
 from __future__ import annotations
 

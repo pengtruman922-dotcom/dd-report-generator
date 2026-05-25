@@ -1,4 +1,4 @@
-﻿"""Attachment-driven v4 update pipeline."""
+"""Attachment-driven v4 update pipeline."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""FastGPT push adapter helpers for report chunks."""
+"""FastGPT push adapter helpers for report chunks."""
 
 from __future__ import annotations
 

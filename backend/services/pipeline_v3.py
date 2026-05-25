@@ -1,4 +1,4 @@
-﻿"""v4 pipeline running behind the legacy pipeline_v3 entrypoint."""
+"""v4 pipeline running behind the legacy pipeline_v3 entrypoint."""
 
 from __future__ import annotations
 
