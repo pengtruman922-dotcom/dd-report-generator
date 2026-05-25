@@ -77,15 +77,16 @@ export default function LoginPage() {
           }} />
         </div>
 
+        {/* Logo - top left */}
+        <div className="absolute top-8 left-8 z-10">
+          <img
+            src="/image copy.png"
+            alt="中大咨询集团"
+            className="h-14 object-contain"
+          />
+        </div>
+
         <div className="relative z-10 max-w-md w-full">
-          {/* Logo */}
-          <div className="mb-10">
-            <img
-              src="/image copy.png"
-              alt="中大咨询集团"
-              className="h-10 object-contain"
-            />
-          </div>
 
           {/* Platform Name */}
           <div className="mb-10">
@@ -213,7 +214,7 @@ export default function LoginPage() {
           {/* Footer */}
           <div className="mt-12 pt-6 border-t border-gray-100">
             <p className="text-xs text-gray-300 text-center">
-              &copy; 中大咨询集团 &middot; 投资撮合事业部
+              &copy; 中大咨询集团
             </p>
           </div>
         </div>
